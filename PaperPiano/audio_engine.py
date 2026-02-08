@@ -38,11 +38,16 @@ def _sawtooth(t, freq):
 def _square(t, freq):
     return np.sign(np.sin(2 * np.pi * freq * t))
 
+# ── Noise generator for drums ─────────────────────────────────────────────────
+def _noise(t, freq):
+    return np.random.uniform(-1, 1, len(t))
+
 WAVE_FN = {
     'sine': _sine,
     'triangle': _triangle,
     'sawtooth': _sawtooth,
     'square': _square,
+    'noise': _noise,
 }
 
 # ── Presets (mirror the JS version) ──────────────────────────────────────────
@@ -80,6 +85,46 @@ PRESETS = {
         'decay': 0.15,
         'sustain': 0.25,
         'release': 0.3,
+    },
+    'kick': {
+        'oscillators': [
+            {'type': 'sine', 'detune': 0, 'gain': 0.5},
+            {'type': 'noise', 'freq_mul': 1, 'gain': 0.1},
+        ],
+        'attack': 0.001,
+        'decay': 0.15,
+        'sustain': 0.0,
+        'release': 0.08,
+    },
+    'snare': {
+        'oscillators': [
+            {'type': 'noise', 'freq_mul': 1, 'gain': 0.35},
+            {'type': 'triangle', 'detune': 0, 'gain': 0.2},
+        ],
+        'attack': 0.001,
+        'decay': 0.08,
+        'sustain': 0.0,
+        'release': 0.06,
+    },
+    'hihat': {
+        'oscillators': [
+            {'type': 'noise', 'freq_mul': 1, 'gain': 0.25},
+            {'type': 'square', 'freq_mul': 6, 'gain': 0.05},
+        ],
+        'attack': 0.001,
+        'decay': 0.04,
+        'sustain': 0.0,
+        'release': 0.03,
+    },
+    'tom': {
+        'oscillators': [
+            {'type': 'sine', 'detune': 0, 'gain': 0.4},
+            {'type': 'noise', 'freq_mul': 1, 'gain': 0.12},
+        ],
+        'attack': 0.002,
+        'decay': 0.12,
+        'sustain': 0.0,
+        'release': 0.1,
     },
 }
 
@@ -233,22 +278,25 @@ class AudioEngine:
         if name in PRESETS:
             self.preset_name = name
 
-    def note_on(self, shape_id: str, note_name: str):
+    def note_on(self, shape_id: str, note_name: str, preset_override: str = None):
         if not self._running:
             self.init()
         freq = self.get_frequency(note_name)
         if freq is None:
             return
+        use_preset = preset_override or self.preset_name
+        if use_preset not in PRESETS:
+            use_preset = self.preset_name
         with self._lock:
             if shape_id in self._active:
                 return  # already playing
             self._active[shape_id] = {
                 'freq': freq,
-                'preset': PRESETS[self.preset_name],
+                'preset': PRESETS[use_preset],
                 'phase': 0.0,
                 'env_pos': 0,
                 'releasing': False,
-                'rel_level': PRESETS[self.preset_name]['sustain'],
+                'rel_level': PRESETS[use_preset]['sustain'],
                 'rel_pos': 0,
                 'env_done': False,
             }
