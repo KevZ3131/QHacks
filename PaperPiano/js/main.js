@@ -690,12 +690,8 @@
         $shapeEditor.style.left = left + 'px';
         $shapeEditor.style.top  = top  + 'px';
 
-        // Build content based on instrument type
-        if (shape.instrument === 'piano') {
-            buildPianoEditor(shape);
-        } else {
-            buildDrumEditor(shape);
-        }
+        // Build content — always includes instrument toggle
+        buildEditorContent(shape);
     }
 
     function closeEditor () {
@@ -712,80 +708,93 @@
         }
     });
 
-    /** Build a piano-note picker (chromatic, with octave selector). */
-    function buildPianoEditor (shape) {
-        // Parse current note & octave
-        const curBase = shape.note.replace(/\d+$/, '');
-        const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
-
-        $editorTitle.textContent = '🎹 Piano Key — ' + shape.id;
+    /** Unified editor builder — instrument toggle + specific controls. */
+    function buildEditorContent (shape) {
+        const isPiano = shape.instrument === 'piano';
+        $editorTitle.textContent = (isPiano ? '🎹 Piano Key' : '🥁 Drum Pad') + ' — ' + shape.id;
 
         let html = '';
 
-        // Octave row
-        html += '<div class="editor-section-label">Octave</div>';
+        // ---- Instrument selector (always shown) ----
+        html += '<div class="editor-section-label">Instrument</div>';
         html += '<div class="editor-grid">';
-        for (let o = 2; o <= 6; o++) {
-            const sel = o === curOct ? ' selected' : '';
-            html += `<button class="note-btn${sel}" data-action="set-octave" data-oct="${o}">${o}</button>`;
-        }
+        html += `<button class="note-btn${isPiano  ? ' selected' : ''}" data-action="set-instrument" data-inst="piano">🎹 Piano</button>`;
+        html += `<button class="note-btn${!isPiano ? ' selected' : ''}" data-action="set-instrument" data-inst="drums">🥁 Drums</button>`;
         html += '</div>';
 
-        // Note row
-        html += '<div class="editor-section-label">Note</div>';
-        html += '<div class="editor-grid">';
-        for (const n of ALL_NOTES) {
-            const sel   = n === curBase ? ' selected' : '';
-            const sharp = n.includes('#') ? ' sharp' : '';
-            html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
+        // ---- Instrument-specific controls ----
+        if (isPiano) {
+            const curBase = shape.note.replace(/\d+$/, '');
+            const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+
+            html += '<div class="editor-section-label">Octave</div>';
+            html += '<div class="editor-grid">';
+            for (let o = 2; o <= 6; o++) {
+                const sel = o === curOct ? ' selected' : '';
+                html += `<button class="note-btn${sel}" data-action="set-octave" data-oct="${o}">${o}</button>`;
+            }
+            html += '</div>';
+
+            html += '<div class="editor-section-label">Note</div>';
+            html += '<div class="editor-grid">';
+            for (const n of ALL_NOTES) {
+                const sel   = n === curBase ? ' selected' : '';
+                const sharp = n.includes('#') ? ' sharp' : '';
+                html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
+            }
+            html += '</div>';
+        } else {
+            html += '<div class="editor-section-label">Drum Sound</div>';
+            html += '<div class="editor-grid">';
+            for (const d of DRUM_OPTIONS) {
+                const sel = d === shape.note ? ' selected' : '';
+                html += `<button class="note-btn drum-btn${sel}" data-drum="${d}">${d}</button>`;
+            }
+            html += '</div>';
         }
-        html += '</div>';
 
         $editorBody.innerHTML = html;
 
-        // Bind clicks
+        // ---- Bind all button clicks ----
         $editorBody.querySelectorAll('[data-action]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const action = btn.dataset.action;
-                if (action === 'set-note') {
+
+                if (action === 'set-instrument') {
+                    const newInst = btn.dataset.inst;
+                    if (newInst !== shape.instrument) {
+                        shape.instrument = newInst;
+                        if (newInst === 'piano') {
+                            shape.note    = 'C4';
+                            shape.isBlack = false;
+                        } else {
+                            shape.note = 'kick';
+                        }
+                    }
+                    buildEditorContent(shape);
+                } else if (action === 'set-note') {
                     const newBase = btn.dataset.note;
                     const oct = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
-                    shape.note = newBase + oct;
-                    // Preview the sound
+                    shape.note    = newBase + oct;
+                    shape.isBlack = newBase.includes('#');
                     audio.play('__preview', shape.note, 'piano');
                     setTimeout(() => audio.stop('__preview'), 300);
-                    buildPianoEditor(shape); // refresh selection
+                    buildEditorContent(shape);
                 } else if (action === 'set-octave') {
                     const base = shape.note.replace(/\d+$/, '');
                     shape.note = base + btn.dataset.oct;
                     audio.play('__preview', shape.note, 'piano');
                     setTimeout(() => audio.stop('__preview'), 300);
-                    buildPianoEditor(shape);
+                    buildEditorContent(shape);
                 }
             });
         });
-    }
-
-    /** Build a drum-type picker. */
-    function buildDrumEditor (shape) {
-        $editorTitle.textContent = '🥁 Drum Pad — ' + shape.id;
-
-        let html = '<div class="editor-section-label">Drum Sound</div>';
-        html += '<div class="editor-grid">';
-        for (const d of DRUM_OPTIONS) {
-            const sel = d === shape.note ? ' selected' : '';
-            html += `<button class="note-btn drum-btn${sel}" data-drum="${d}">${d}</button>`;
-        }
-        html += '</div>';
-
-        $editorBody.innerHTML = html;
 
         $editorBody.querySelectorAll('[data-drum]').forEach(btn => {
             btn.addEventListener('click', () => {
                 shape.note = btn.dataset.drum;
-                // Preview
                 audio.play('__preview_d', shape.note, 'drums');
-                buildDrumEditor(shape); // refresh selection
+                buildEditorContent(shape);
             });
         });
     }
