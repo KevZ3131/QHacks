@@ -143,7 +143,7 @@ class ShapeDetector {
             cv.adaptiveThreshold(blurred, thA, 255,
                 cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
             cv.bitwise_and(thA, mask, thA);           // zero out everything outside paper
-            const resA = this._extractShapes(thA, 'Adaptive', paperCnt);
+            const resA = this._extractShapes(thA, 'Adaptive', paperCnt, mask);
             log += `A(adapt): ${resA.rectangles.length}r ${resA.circles.length}c  `;
             strategies.push({ result: resA, thresh: thA });
         } catch (e) { log += 'A:err  '; }
@@ -154,7 +154,7 @@ class ShapeDetector {
             cv.threshold(blurred, thB, 0, 255,
                          cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
             cv.bitwise_and(thB, mask, thB);
-            const resB = this._extractShapes(thB, 'Otsu', paperCnt);
+            const resB = this._extractShapes(thB, 'Otsu', paperCnt, mask);
             log += `B(otsu): ${resB.rectangles.length}r ${resB.circles.length}c  `;
             strategies.push({ result: resB, thresh: thB });
         } catch (e) { log += 'B:err  '; }
@@ -167,7 +167,7 @@ class ShapeDetector {
             cv.dilate(edges, edges, k);
             k.delete();
             cv.bitwise_and(edges, mask, edges);
-            const resC = this._extractShapes(edges, 'Canny', paperCnt);
+            const resC = this._extractShapes(edges, 'Canny', paperCnt, mask);
             log += `C(canny): ${resC.rectangles.length}r ${resC.circles.length}c`;
             strategies.push({ result: resC, thresh: edges });
         } catch (e) { log += 'C:err'; }
@@ -267,26 +267,51 @@ class ShapeDetector {
     /* ---------- contour extraction from a binary image ---------- */
 
     /**
-     * @param {cv.Mat} binaryImg – already masked to paper region
+     * Find shapes by detecting their INTERIOR regions (negative space).
+     *
+     * Instead of finding contours of pen strokes, we invert the binary
+     * so that the white spaces *inside* each drawn shape become separate
+     * white regions.  Shared walls between adjacent shapes (e.g. piano
+     * keys drawn as one big rectangle with lines through it) act as
+     * black barriers in the inverted image, naturally separating each
+     * interior into its own contour.
+     *
+     * @param {cv.Mat} binaryImg – strokes=255, rest=0 (already masked to paper)
      * @param {string} label
-     * @param {cv.Mat|null} paperCnt – paper contour (used for size filtering)
+     * @param {cv.Mat|null} paperCnt – paper contour (for center-in-paper test)
+     * @param {cv.Mat|null} paperMask – 255 inside paper, 0 outside
      */
-    _extractShapes (binaryImg, label, paperCnt) {
-        // Morphological close → merge broken pen strokes within a single shape.
-        // Keep the kernel small (3×3) so adjacent shapes don't merge together.
-        // No dilation — it bridges gaps between neighbouring keys.
-        const closed = new cv.Mat();
-        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-        cv.morphologyEx(binaryImg, closed, cv.MORPH_CLOSE, kernel);
+    _extractShapes (binaryImg, label, paperCnt, paperMask) {
 
+        // 1. Dilate pen strokes so thin dividing lines become solid barriers.
+        //    This also bridges small gaps / breaks in hand-drawn lines.
+        const dilated = new cv.Mat();
+        const dilK    = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+        cv.dilate(binaryImg, dilated, dilK);
+
+        // 2. Invert: interiors → 255, strokes → 0, outside paper → 255
+        const inverted = new cv.Mat();
+        cv.bitwise_not(dilated, inverted);
+
+        // 3. Mask to paper region so background outside paper stays black.
+        //    Erode the mask a few px so the paper border doesn't create a
+        //    spurious ribbon of white around the edges.
+        if (paperMask) {
+            const shrunk  = new cv.Mat();
+            const shrunkK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+            cv.erode(paperMask, shrunk, shrunkK);
+            cv.bitwise_and(inverted, shrunk, inverted);
+            shrunk.delete();
+            shrunkK.delete();
+        }
+
+        // 4. Find contours of the interior regions
         const contours  = new cv.MatVector();
         const hierarchy = new cv.Mat();
-        cv.findContours(closed, contours, hierarchy,
+        cv.findContours(inverted, contours, hierarchy,
                         cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        // Reference area: use the paper area if we have it, else full image
-        const refArea = paperCnt ? cv.contourArea(paperCnt) : (this._w * this._h);
-
+        const refArea    = paperCnt ? cv.contourArea(paperCnt) : (this._w * this._h);
         const rectangles = [];
         const circles    = [];
 
@@ -294,23 +319,21 @@ class ShapeDetector {
             const cnt  = contours.get(i);
             const area = cv.contourArea(cnt);
 
-            // Too small (<0.5 % of paper) or too large (>60 % of paper → it's the paper itself)
-            if (area < refArea * 0.005 || area > refArea * 0.60) continue;
+            // Size filter: 0.3 % – 45 % of paper
+            if (area < refArea * 0.003 || area > refArea * 0.45) continue;
 
             const peri = cv.arcLength(cnt, true);
             if (peri < 20) continue;
 
-            // If we have a paper contour, reject shapes whose center is outside it
+            // Centre-in-paper check
             if (paperCnt) {
-                const rect  = cv.boundingRect(cnt);
-                const cx    = rect.x + rect.width / 2;
-                const cy    = rect.y + rect.height / 2;
-                const inside = cv.pointPolygonTest(paperCnt,
-                                   new cv.Point(cx, cy), false);
-                if (inside < 0) continue; // center is outside paper
+                const r  = cv.boundingRect(cnt);
+                const cx = r.x + r.width / 2;
+                const cy = r.y + r.height / 2;
+                if (cv.pointPolygonTest(paperCnt, new cv.Point(cx, cy), false) < 0)
+                    continue;
             }
 
-            // Use a tighter epsilon (2%) so rectangle corners are preserved
             const approx = new cv.Mat();
             cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
@@ -319,51 +342,29 @@ class ShapeDetector {
             const rect        = cv.boundingRect(cnt);
             const extent      = area / (rect.width * rect.height);
             const aspect      = rect.width / rect.height;
+            approx.delete();
 
             console.log(`[Shape ${label}#${i}] v=${verts} circ=${circularity.toFixed(3)} ext=${extent.toFixed(3)} asp=${aspect.toFixed(2)} area=${area.toFixed(0)}`);
 
-            /*
-             * Classification strategy — vertex count is the primary signal:
-             *
-             * CIRCLE:  high circularity (>= 0.75) AND aspect close to 1:1
-             *          OR many vertices (>= 8) with circularity >= 0.60
-             *
-             * RECTANGLE: 4-6 vertices (tight approxPolyDP preserves corners)
-             *            with low circularity (< 0.75) and decent fill (extent > 0.35)
-             *
-             * The key insight is: with a 2% epsilon, a rectangle keeps exactly
-             * 4 vertices while a circle/ellipse has 8+ vertices.
-             */
-
-            // PRIMARY: vertex count is the strongest signal
-            if (verts === 4 || verts === 5) {
-                // Almost certainly a rectangle (4 corners, maybe 5 with a wobbly edge)
-                if (extent > 0.30) {
-                    rectangles.push(this._scaleRect(rect, area));
-                }
+            // Classify by vertex count (primary) + circularity (secondary)
+            if (verts >= 4 && verts <= 5) {
+                if (extent > 0.30) rectangles.push(this._scaleRect(rect, area));
             } else if (verts === 6 || verts === 7) {
-                // Ambiguous zone: could be a rounded rect or an irregular circle
-                if (circularity >= 0.75 && aspect >= 0.65 && aspect <= 1.55) {
+                if (circularity >= 0.75 && aspect >= 0.65 && aspect <= 1.55)
                     circles.push(this._scaleCircle(rect, area));
-                } else if (extent > 0.30) {
+                else if (extent > 0.30)
                     rectangles.push(this._scaleRect(rect, area));
-                }
             } else if (verts >= 8) {
-                // Many vertices → likely a circle/ellipse
-                if (circularity >= 0.55 && aspect >= 0.45 && aspect <= 2.2) {
+                if (circularity >= 0.55 && aspect >= 0.45 && aspect <= 2.2)
                     circles.push(this._scaleCircle(rect, area));
-                } else if (extent > 0.30) {
-                    // Very irregular but still filled → rectangle fallback
+                else if (extent > 0.30)
                     rectangles.push(this._scaleRect(rect, area));
-                }
             }
-            // verts < 4: skip (triangle or noise)
-
-            approx.delete();
         }
 
         // Cleanup
-        closed.delete(); kernel.delete();
+        dilated.delete(); dilK.delete();
+        inverted.delete();
         contours.delete(); hierarchy.delete();
 
         return { rectangles, circles };
