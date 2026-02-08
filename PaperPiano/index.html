@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Paper Piano — Draw &amp; Play</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
+
 <body>
     <!-- ======== Splash / Start Screen ======== -->
     <div id="splash">
@@ -16,7 +18,8 @@
             <div class="instructions">
                 <div class="step">
                     <span class="step-num">1</span>
-                    <p>Draw <strong>rectangles</strong> (piano keys) and <strong>circles</strong> (drum pads) on white paper with a dark marker.</p>
+                    <p>Draw <strong>rectangles</strong> (piano keys) and <strong>circles</strong> (drum pads) on white
+                        paper with a dark marker.</p>
                 </div>
                 <div class="step">
                     <span class="step-num">2</span>
@@ -71,6 +74,9 @@
                 <button id="mirrorBtn" class="btn-ctrl">
                     <span class="icon">&#128260;</span> Mirror
                 </button>
+                <button id="songModeBtn" class="btn-ctrl">
+                    <span class="icon">&#127925;</span> Song Mode
+                </button>
             </div>
 
             <div class="controls-row">
@@ -83,6 +89,34 @@
                     <input type="range" id="sensitivitySlider" min="10" max="100" value="50">
                 </label>
                 <button id="debugBtn" class="btn-ctrl btn-small">Debug</button>
+            </div>
+        </div>
+
+        <!-- Song mode panel -->
+        <div id="songPanel" class="hidden">
+            <div class="song-panel-header">
+                <span class="song-panel-title">Song Learning Mode</span>
+                <button id="songPanelClose" class="editor-close">&times;</button>
+            </div>
+            <div class="song-panel-body">
+                <div class="song-search-row">
+                    <input type="text" id="songSearch" class="song-search-input" placeholder="Search songs...">
+                    <button id="songSearchBtn" class="btn-ctrl btn-small">Search</button>
+                    <button id="songRefreshBtn" class="btn-ctrl btn-small">Refresh</button>
+                </div>
+                <div id="songList" class="song-list"></div>
+                <div id="songControls" class="song-controls hidden">
+                    <span id="songNowPlaying" class="song-now-playing"></span>
+                    <div class="song-btn-row">
+                        <button id="songPlayBtn" class="btn-ctrl">Play</button>
+                        <button id="songPauseBtn" class="btn-ctrl">Pause</button>
+                        <button id="songStopBtn" class="btn-ctrl">Stop</button>
+                        <label class="slider-label" style="margin-left:auto;">
+                            Speed <span id="songSpeedVal">1.0x</span>
+                            <input type="range" id="songSpeedSlider" min="25" max="200" value="100" step="25">
+                        </label>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -113,23 +147,25 @@
 
     <!-- ============ External Libraries ============ -->
     <!-- MediaPipe Hands (legacy Solutions API — works with plain script tags) -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
-            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
-            crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
-            crossorigin="anonymous"></script>
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 
     <!-- OpenCV.js (loaded async — shape detection waits for it) -->
-    <script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"
-            type="text/javascript"
-            id="opencvScript"></script>
+    <script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js" type="text/javascript"
+        id="opencvScript"></script>
+
+    <!-- Tone.js MIDI parser (client-side MIDI file parsing) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
 
     <!-- ============ Application Scripts ============ -->
     <script src="js/audio-engine.js"></script>
     <script src="js/hand-tracker.js"></script>
     <script src="js/shape-detector.js"></script>
     <script src="js/note-recognizer.js"></script>
+    <script src="js/song-player.js"></script>
     <script src="js/main.js"></script>
 </body>
+
 </html>

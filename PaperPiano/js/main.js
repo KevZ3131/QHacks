@@ -43,6 +43,22 @@
     const $handDot       = document.querySelector('#handStatus .dot');
     const $cvDot         = document.querySelector('#cvStatus .dot');
 
+    /* Song mode DOM handles */
+    const $songModeBtn   = document.getElementById('songModeBtn');
+    const $songPanel     = document.getElementById('songPanel');
+    const $songPanelClose = document.getElementById('songPanelClose');
+    const $songSearch    = document.getElementById('songSearch');
+    const $songSearchBtn = document.getElementById('songSearchBtn');
+    const $songRefreshBtn = document.getElementById('songRefreshBtn');
+    const $songList      = document.getElementById('songList');
+    const $songControls  = document.getElementById('songControls');
+    const $songNowPlaying = document.getElementById('songNowPlaying');
+    const $songPlayBtn   = document.getElementById('songPlayBtn');
+    const $songPauseBtn  = document.getElementById('songPauseBtn');
+    const $songStopBtn   = document.getElementById('songStopBtn');
+    const $songSpeedSlider = document.getElementById('songSpeedSlider');
+    const $songSpeedVal  = document.getElementById('songSpeedVal');
+
     /* ==============================================================
        Subsystems
        ============================================================== */
@@ -50,6 +66,7 @@
     const hands  = new HandTracker();
     const shapes = new ShapeDetector();
     const notes  = new NoteRecognizer();
+    const songPlayer = new SongPlayer(audio);
 
     /* ==============================================================
        State
@@ -59,10 +76,10 @@
     let autoScan      = false;
     let autoScanTimer = null;
     let showDebug     = false;
+    let songMode      = false;
 
     let prevPressed   = new Set();      // shape ids currently held
     let activeHUD     = new Map();      // id → timeout handle
-    let debounceMap   = new Map();      // shape id → timestamp of last release
 
     /* ----------------------------------------------------------
      * Tap detector — tracks fingertip vertical motion and fires
@@ -74,15 +91,22 @@
      *      over the last few frames (velocity > threshold).
      *   2. On this frame the finger is inside a shape.
      *
-     * After a tap fires we add a cooldown so the same finger
-     * can't re-trigger for a short period.
+     * After a tap fires the note sustains as long as the finger
+     * remains on the shape.  When the finger lifts off (leaves
+     * the shape), the note stops.
      * ---------------------------------------------------------- */
     const tapState = {};   // key → { yHist: number[], lastTapTime: number }
 
     const TAP_HISTORY    = 4;      // frames of history to keep
     const TAP_VEL_THRESH = 0.008;  // min downward y-delta (normalised) over history window
     const TAP_COOLDOWN   = 250;    // ms before same finger can tap again
-    const TAP_SUSTAIN    = 300;    // ms to hold a note after tap
+    const MIN_SUSTAIN    = 150;    // ms minimum hold time to prevent flicker
+
+    /**
+     * Held notes: maps fingerKey → { shapeId, startTime }
+     * Tracks which finger is currently holding which shape.
+     */
+    const heldNotes = new Map();
 
     /**
      * Update tap tracking for a single fingertip.
@@ -127,6 +151,28 @@
         for (const key of Object.keys(tapState)) {
             if (!activeKeys.has(key)) delete tapState[key];
         }
+    }
+
+    /**
+     * Hit-test a pixel position against all assigned shapes.
+     * Returns the best matching shape or null.
+     */
+    function hitTestShapeAt (px, py, pad) {
+        const hits = notes.assignedShapes.filter(s => {
+            if (s.type === 'rectangle') {
+                return px >= s.x - pad && px <= s.x + s.width + pad &&
+                       py >= s.y - pad && py <= s.y + s.height + pad;
+            } else if (s.type === 'circle') {
+                return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
+            }
+            return false;
+        });
+        if (hits.length === 0) return null;
+        hits.sort((a, b) => {
+            if (a.priority !== b.priority) return b.priority - a.priority;
+            return a.area - b.area;
+        });
+        return hits[0];
     }
 
     // FPS tracking
@@ -178,6 +224,10 @@
             $loadingOvr.classList.add('hidden');
             $scanBtn.disabled = false;
             running = true;
+
+            // Create a default on-screen piano so users can play immediately
+            createDefaultPiano();
+
             requestAnimationFrame(frame);
         } catch (err) {
             setLoading('Error: ' + err.message);
@@ -200,6 +250,13 @@
 
         processInteraction();
         draw();
+
+        // Song mode: tick playback and draw falling notes
+        if (songMode && songPlayer.playing) {
+            songPlayer.tick();
+            songPlayer.draw(octx, $overlay.width, $overlay.height, notes.assignedShapes);
+        }
+
         updateFPS();
 
         requestAnimationFrame(frame);
@@ -217,46 +274,60 @@
 
         pruneOldTaps(tips);
 
-        // For each visible fingertip, check for a tap gesture
+        // Build a set of active finger keys this frame
+        const activeFingers = new Set(tips.map(t => t.hand + ':' + t.finger));
+
+        // --- Phase 1: detect new taps and start holding ---
         for (const tip of tips) {
+            const fingerKey = tip.hand + ':' + tip.finger;
+
+            // If this finger is already holding a note, skip tap detection
+            if (heldNotes.has(fingerKey)) continue;
+
             const tapped = updateTap(tip);
             if (!tapped) continue;
 
-            // Finger just tapped — see which shape it's inside
-            const px   = tip.x * cw;
-            const py   = tip.y * ch;
-            const hits = notes.assignedShapes.filter(s => {
-                if (s.type === 'rectangle') {
-                    return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
-                } else if (s.type === 'circle') {
-                    return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
-                }
-                return false;
-            });
+            const px = tip.x * cw;
+            const py = tip.y * ch;
+            const shape = hitTestShapeAt(px, py, pad);
+            if (!shape) continue;
 
-            if (hits.length === 0) continue;
-
-            // Resolve overlaps: highest priority, then smallest area
-            hits.sort((a, b) => {
-                if (a.priority !== b.priority) return b.priority - a.priority;
-                return a.area - b.area;
-            });
-
-            const shape = hits[0];
-
-            // Play note & schedule auto-stop after sustain period
+            // Start holding this note
             audio.play(shape.id, shape.note, shape.instrument);
             showNoteHUD(shape);
             prevPressed.add(shape.id);
+            heldNotes.set(fingerKey, { shapeId: shape.id, startTime: now });
+        }
 
-            // Auto-release after TAP_SUSTAIN ms
-            const sid = shape.id;
-            debounceMap.set(sid, now);
-            setTimeout(() => {
-                audio.stop(sid);
-                prevPressed.delete(sid);
-            }, TAP_SUSTAIN);
+        // --- Phase 2: sustain or release held notes ---
+        for (const [fingerKey, held] of heldNotes) {
+            // Find the current position of this finger
+            const tip = tips.find(t => (t.hand + ':' + t.finger) === fingerKey);
+
+            // Finger disappeared entirely — release after min sustain
+            if (!tip) {
+                if (now - held.startTime >= MIN_SUSTAIN) {
+                    audio.stop(held.shapeId);
+                    prevPressed.delete(held.shapeId);
+                    heldNotes.delete(fingerKey);
+                }
+                continue;
+            }
+
+            // Finger still visible — check if it's still on the same shape
+            const px = tip.x * cw;
+            const py = tip.y * ch;
+            const shape = hitTestShapeAt(px, py, pad);
+
+            if (!shape || shape.id !== held.shapeId) {
+                // Finger moved off the shape — release (after min sustain)
+                if (now - held.startTime >= MIN_SUSTAIN) {
+                    audio.stop(held.shapeId);
+                    prevPressed.delete(held.shapeId);
+                    heldNotes.delete(fingerKey);
+                }
+            }
+            // else: finger is still on the shape, keep sustaining
         }
     }
 
@@ -348,6 +419,96 @@
     }
 
     /* ==============================================================
+       Default on-screen piano
+       ============================================================== */
+
+    /**
+     * Generate a virtual piano keyboard at the bottom of the overlay.
+     * Creates 14 white keys (2 octaves) + 10 black keys that plug
+     * directly into notes.assignedShapes so all existing interaction,
+     * drawing, and song-mode code works automatically.
+     */
+    function createDefaultPiano () {
+        const cw  = $overlay.width  || 1280;
+        const ch  = $overlay.height || 720;
+        const oct = +$octaveSlider.value;
+
+        const WHITE = ['C','D','E','F','G','A','B'];
+        // Which white-key indices have a black key to their right
+        const BLACK_AFTER = { 0:'C#', 1:'D#', 3:'F#', 4:'G#', 5:'A#' };
+
+        const numWhites = 14; // 2 full octaves
+        const gap  = 8;      // px gap between white keys
+        const keyW = Math.floor((cw - gap * (numWhites - 1)) / numWhites);
+        const whiteH = Math.floor(ch * 0.28);
+        const blackH = Math.floor(whiteH * 0.6);
+        const blackW = Math.floor(keyW * 0.55);
+        const topY   = ch - whiteH;
+        const stride = keyW + gap;  // center-to-edge distance between keys
+
+        const assigned = [];
+
+        // ---- white keys ----
+        for (let i = 0; i < numWhites; i++) {
+            const ni  = i % WHITE.length;
+            const o   = oct + Math.floor(i / WHITE.length);
+            const x   = i * stride;
+            assigned.push({
+                type:       'rectangle',
+                x:          x,
+                y:          topY,
+                width:      keyW,
+                height:     whiteH,
+                centerX:    x + keyW / 2,
+                centerY:    topY + whiteH / 2,
+                area:       keyW * whiteH,
+                id:         'w' + i,
+                note:       WHITE[ni] + o,
+                instrument: 'piano',
+                isBlack:    false,
+                priority:   0,
+            });
+        }
+
+        // ---- black keys ----
+        let bi = 0;
+        for (let i = 0; i < numWhites; i++) {
+            const ni = i % WHITE.length;
+            if (!(ni in BLACK_AFTER)) continue;
+
+            const o  = oct + Math.floor(i / WHITE.length);
+            const x  = i * stride + keyW + gap / 2 - blackW / 2;
+            const blackY = topY - Math.floor(blackH * 0.4);
+            assigned.push({
+                type:       'rectangle',
+                x:          x,
+                y:          blackY,
+                width:      blackW,
+                height:     blackH,
+                centerX:    x + blackW / 2,
+                centerY:    blackY + blackH / 2,
+                area:       blackW * blackH,
+                id:         'b' + bi,
+                note:       BLACK_AFTER[ni] + o,
+                instrument: 'piano',
+                isBlack:    true,
+                priority:   1,
+            });
+            bi++;
+        }
+
+        notes.assignedShapes = assigned;
+
+        const nKeys = assigned.filter(s => !s.isBlack).length;
+        const nBlack = assigned.filter(s => s.isBlack).length;
+        $keyCount.textContent = nKeys + nBlack;
+        $padCount.textContent = 0;
+        $shapeBadge.classList.remove('hidden');
+
+        console.log(`[Piano] default keyboard: ${nKeys} white + ${nBlack} black keys, octave ${oct}`);
+    }
+
+    /* ==============================================================
        Shape scanning
        ============================================================== */
     function scanShapes () {
@@ -404,14 +565,116 @@
 
     $octaveSlider.addEventListener('input', () => {
         $octaveVal.textContent = $octaveSlider.value;
-        // Re-assign notes at new octave if shapes already detected
-        if (notes.assignedShapes.length) scanShapes();
+        // Re-assign notes at new octave
+        if (notes.assignedShapes.length) {
+            // If shapes came from a scan, re-scan; otherwise regenerate default piano
+            if (shapes.lastLog) {
+                scanShapes();
+            } else {
+                createDefaultPiano();
+            }
+        }
     });
 
     $debugBtn.addEventListener('click', () => {
         showDebug = !showDebug;
         $debugPanel.classList.toggle('hidden', !showDebug);
         $debugBtn.classList.toggle('active', showDebug);
+    });
+
+    /* ==============================================================
+       Song Mode — MIDI song learning with falling notes
+       ============================================================== */
+
+    $songModeBtn.addEventListener('click', () => {
+        songMode = !songMode;
+        $songPanel.classList.toggle('hidden', !songMode);
+        $songModeBtn.classList.toggle('active', songMode);
+        if (songMode) refreshSongList();
+    });
+
+    $songPanelClose.addEventListener('click', () => {
+        songMode = false;
+        songPlayer.stop();
+        $songPanel.classList.add('hidden');
+        $songModeBtn.classList.remove('active');
+    });
+
+    async function refreshSongList () {
+        $songList.innerHTML = '<div style="color: var(--text-dim); font-size:.78rem;">Loading…</div>';
+        try {
+            const songs = await songPlayer.fetchSongList();
+            renderSongList(songs);
+        } catch (e) {
+            $songList.innerHTML = '<div style="color: var(--accent); font-size:.78rem;">Could not connect to server. Run: python3 app.py</div>';
+        }
+    }
+
+    function renderSongList (songs) {
+        if (songs.length === 0) {
+            $songList.innerHTML = '<div style="color: var(--text-dim); font-size:.78rem;">No songs found. Add .mid files to midi_songs/</div>';
+            return;
+        }
+        let html = '';
+        for (const s of songs) {
+            html += `<div class="song-item" data-file="${s.file}">
+                <span class="song-item-name">${s.name}</span>
+            </div>`;
+        }
+        $songList.innerHTML = html;
+
+        $songList.querySelectorAll('.song-item').forEach(el => {
+            el.addEventListener('click', async () => {
+                const file = el.dataset.file;
+                try {
+                    await songPlayer.loadSong(file);
+                    $songControls.classList.remove('hidden');
+                    $songNowPlaying.textContent = 'Loaded: ' + songPlayer.songName;
+                    // Highlight active item
+                    $songList.querySelectorAll('.song-item').forEach(e => e.classList.remove('active'));
+                    el.classList.add('active');
+                } catch (err) {
+                    $songNowPlaying.textContent = 'Error: ' + err.message;
+                }
+            });
+        });
+    }
+
+    $songSearchBtn.addEventListener('click', async () => {
+        const query = $songSearch.value.trim();
+        try {
+            const songs = await songPlayer.searchSongs(query);
+            renderSongList(songs);
+        } catch (e) {
+            $songList.innerHTML = '<div style="color: var(--accent); font-size:.78rem;">Search failed — is the server running?</div>';
+        }
+    });
+
+    $songSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') $songSearchBtn.click();
+    });
+
+    $songRefreshBtn.addEventListener('click', refreshSongList);
+
+    $songPlayBtn.addEventListener('click', () => {
+        songPlayer.start();
+        $songNowPlaying.textContent = 'Playing: ' + songPlayer.songName;
+    });
+
+    $songPauseBtn.addEventListener('click', () => {
+        songPlayer.pause();
+        $songNowPlaying.textContent = 'Paused: ' + songPlayer.songName;
+    });
+
+    $songStopBtn.addEventListener('click', () => {
+        songPlayer.stop();
+        $songNowPlaying.textContent = 'Stopped: ' + songPlayer.songName;
+    });
+
+    $songSpeedSlider.addEventListener('input', () => {
+        const speed = +$songSpeedSlider.value / 100;
+        songPlayer.speed = speed;
+        $songSpeedVal.textContent = speed.toFixed(2) + 'x';
     });
 
     /* ==============================================================
