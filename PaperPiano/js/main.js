@@ -1,17 +1,18 @@
 /**
  * PaperPiano - Main application orchestrator.
  *
- * Flow:
- *   1. Load → camera + all ML models in parallel
+ * Pipeline:
+ *   1. Load → camera + OpenCV + Tesseract + MediaPipe in parallel
  *   2. Ready → live camera feed, user can scan
- *   3. Scanning → freeze frame, detect shapes, run OCR
- *   4. Editing → shapes visible, user edits note assignments
- *   5. Playing → hand tracking active, fingertip-in-shape → note plays
+ *   3. Scanning → freeze frame → OCR full frame → shape detect with seeds
+ *   4. Editing → contour-based shapes visible, user edits note assignments
+ *   5. Playing → hand tracking, point-in-polygon hit test → note plays
  *
- * Graceful degradation:
- *   - OpenCV fails → "Add Demo Shapes" still works
- *   - Tesseract fails → default note assignment (C D E F G A B)
- *   - MediaPipe fails → touch / click to play
+ * Key improvements over v1:
+ *   - Text-first: OCR finds note labels first, shapes grow from those seeds
+ *   - Contour-based hitboxes (not bounding rectangles)
+ *   - Point-in-polygon for finger presses
+ *   - Debug overlay shows text anchors, contour outlines, hand skeleton
  */
 
 import { AudioEngine }    from './audio-engine.js';
@@ -28,12 +29,12 @@ const SHAPE_COLORS = [
 
 // ── Hand-skeleton connections for drawing ──────────────────────────────────────
 const HAND_CONNECTIONS = [
-    [0,1],[1,2],[2,3],[3,4],           // thumb
-    [0,5],[5,6],[6,7],[7,8],           // index
-    [5,9],[9,10],[10,11],[11,12],      // middle
-    [9,13],[13,14],[14,15],[15,16],    // ring
-    [13,17],[17,18],[18,19],[19,20],   // pinky
-    [0,17]                              // palm base
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [5,9],[9,10],[10,11],[11,12],
+    [9,13],[13,14],[14,15],[15,16],
+    [13,17],[17,18],[18,19],[19,20],
+    [0,17]
 ];
 
 class PaperPianoApp {
@@ -45,19 +46,19 @@ class PaperPianoApp {
         this.hands     = new HandTracker();
 
         // State
-        this.shapes       = [];          // detected / manually added shapes
-        this.activeShapes = new Set();   // currently pressed shape IDs
-        this.state        = 'loading';   // loading | ready | scanning | playing
+        this.shapes       = [];
+        this.activeShapes = new Set();
+        this.state        = 'loading';
         this.lastHandRes  = null;
         this.animId       = null;
-        this.mirrored     = false;       // true when using front-facing camera
+        this.mirrored     = false;
 
         // FPS counter
         this._fpsFrames = 0;
         this._fpsLast   = 0;
         this.fps        = 0;
 
-        // DOM refs (bound in bindElements)
+        // DOM refs
         this.video = null;
         this.overlay = null;
         this.octx = null;
@@ -70,6 +71,7 @@ class PaperPianoApp {
         this.bindElements();
         this.bindEvents();
 
+        // ── Load camera + all ML libraries in parallel, show progress ──────
         const results = await Promise.allSettled([
             this.initCamera(),
             this.shapes_.init(s => this.status(s)),
@@ -84,9 +86,8 @@ class PaperPianoApp {
             return;
         }
 
-        // Log which optional modules failed
-        if (ocv.status === 'rejected')   console.warn('OpenCV unavailable:', ocv.reason);
-        if (ocrRes.status === 'rejected') console.warn('OCR unavailable:', ocrRes.reason);
+        if (ocv.status === 'rejected')     console.warn('OpenCV unavailable:', ocv.reason);
+        if (ocrRes.status === 'rejected')  console.warn('OCR unavailable:', ocrRes.reason);
         if (handsRes.status === 'rejected') console.warn('Hand tracking unavailable:', handsRes.reason);
 
         this.hideLoading();
@@ -122,14 +123,12 @@ class PaperPianoApp {
             this.audio.setPreset(e.target.value);
         });
 
-        // Canvas interaction (click to edit notes, or play via click/touch)
         this.overlay.addEventListener('click', e => this.onCanvasClick(e));
         this.overlay.addEventListener('touchstart', e => this.onCanvasTouch(e), { passive: false });
         this.overlay.addEventListener('touchmove',  e => this.onCanvasTouch(e), { passive: false });
         this.overlay.addEventListener('touchend',   e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
         this.overlay.addEventListener('touchcancel', e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
 
-        // Resume AudioContext on first user gesture
         const resumeAudio = () => { this.audio.init(); this.audio.resume(); };
         document.addEventListener('click',      resumeAudio, { once: true });
         document.addEventListener('touchstart', resumeAudio, { once: true });
@@ -139,42 +138,27 @@ class PaperPianoApp {
     async initCamera() {
         this.status('Requesting camera…');
 
-        // Try rear camera first (phone pointing at paper), fall back to any
         let stream;
         try {
             stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    width:  { ideal: 640 },
-                    height: { ideal: 480 },
-                    frameRate: { ideal: 30, min: 15 },
-                    facingMode: 'environment'
-                },
+                video: { width: { ideal: 640 }, height: { ideal: 480 },
+                         frameRate: { ideal: 30, min: 15 }, facingMode: 'environment' },
                 audio: false
             });
             this.mirrored = false;
         } catch {
-            // Fall back to default (front) camera
             stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    width:  { ideal: 640 },
-                    height: { ideal: 480 },
-                    frameRate: { ideal: 30, min: 15 }
-                },
+                video: { width: { ideal: 640 }, height: { ideal: 480 },
+                         frameRate: { ideal: 30, min: 15 } },
                 audio: false
             });
             this.mirrored = true;
         }
 
-        // Detect if the chosen camera is front-facing → mirror the feed
         const track = stream.getVideoTracks()[0];
         const settings = track.getSettings?.() || {};
-        if (settings.facingMode === 'user') {
-            this.mirrored = true;
-        }
-        // Desktop webcams don't report facingMode; default to mirrored for them
-        if (!settings.facingMode) {
-            this.mirrored = true;
-        }
+        if (settings.facingMode === 'user') this.mirrored = true;
+        if (!settings.facingMode) this.mirrored = true;
 
         this.video.srcObject = stream;
         await this.video.play();
@@ -189,10 +173,10 @@ class PaperPianoApp {
         this.status(`Camera active ✓${this.mirrored ? ' (mirrored)' : ''}`);
     }
 
-    // ── Scanning ───────────────────────────────────────────────────────────────
+    // ── Scanning (text-first pipeline) ─────────────────────────────────────────
     async scanShapes() {
         if (!this.shapes_.ready) {
-            this.status('OpenCV is not loaded. Use "Demo Shapes" instead.');
+            this.status('OpenCV is still loading… please wait a moment, then try again.');
             return;
         }
         this.state = 'scanning';
@@ -201,29 +185,66 @@ class PaperPianoApp {
         // Draw current video frame to hidden processing canvas
         this.pctx.drawImage(this.video, 0, 0);
 
-        const found = this.shapes_.detect(this.proc);
+        // ── Step 1: Run full-frame OCR to find text seeds ──────────────────
+        let textSeeds = [];
+        if (this.ocr.ready) {
+            this.status('Running OCR to find note labels…');
+            const ocrPrep = this.shapes_.prepareForOCR(this.proc);
+            const rawSeeds = await this.ocr.detectAll(ocrPrep.canvas);
+
+            // Scale seed coordinates back to original frame size
+            const invScale = 1 / ocrPrep.scale;
+            textSeeds = rawSeeds.map(s => ({
+                ...s,
+                bbox: {
+                    x:      Math.round(s.bbox.x * invScale),
+                    y:      Math.round(s.bbox.y * invScale),
+                    width:  Math.round(s.bbox.width * invScale),
+                    height: Math.round(s.bbox.height * invScale)
+                },
+                center: {
+                    x: Math.round(s.center.x * invScale),
+                    y: Math.round(s.center.y * invScale)
+                }
+            }));
+
+            if (textSeeds.length > 0) {
+                this.status(`Found ${textSeeds.length} note label(s) — detecting shapes…`);
+            } else {
+                this.status('No note labels found — trying contour-only detection…');
+            }
+        }
+
+        // ── Step 2: Detect shapes using text seeds ─────────────────────────
+        const found = this.shapes_.detectWithSeeds(this.proc, textSeeds);
 
         if (found.length === 0) {
-            this.status('No shapes found. Draw dark-outlined rectangles on white paper.');
+            this.status('No shapes found. Draw dark-outlined rectangles on white paper with note names inside.');
             this.state = 'ready';
             return;
         }
 
-        this.status(`Found ${found.length} shape(s) — running OCR…`);
-
+        // ── Step 3: Assign notes (from seeds, per-region OCR, or defaults) ─
         for (let i = 0; i < found.length; i++) {
             const s = found[i];
             s.color    = SHAPE_COLORS[i % SHAPE_COLORS.length];
             s.isActive = false;
 
-            // Try OCR
-            const crop = this.shapes_.extractRegion(this.proc, s.rect);
-            if (crop && this.ocr.ready) {
-                const note = await this.ocr.recognize(crop);
-                s.note = note || this.ocr.getDefaultNote(i);
-            } else {
-                s.note = this.ocr.getDefaultNote(i);
+            // If the text-first pipeline already assigned a note, use it
+            if (s.note) continue;
+
+            // Otherwise try per-region OCR fallback
+            if (this.ocr.ready) {
+                const crop = this.shapes_.extractRegion(this.proc, s.rect);
+                if (crop) {
+                    const note = await this.ocr.recognize(crop);
+                    s.note = note || this.ocr.getDefaultNote(i);
+                    continue;
+                }
             }
+
+            // Last resort: default scale
+            s.note = this.ocr.getDefaultNote(i);
         }
 
         this.shapes = found;
@@ -232,7 +253,7 @@ class PaperPianoApp {
         this.status(`${found.length} shape(s) detected. Click a shape to change its note, then press Play.`);
     }
 
-    // ── Demo shapes (fallback / instant test) ──────────────────────────────────
+    // ── Demo shapes ────────────────────────────────────────────────────────────
     addDemoShapes() {
         const W = this.overlay.width;
         const H = this.overlay.height;
@@ -244,16 +265,26 @@ class PaperPianoApp {
         const startY = Math.floor(H * 0.65);
         const startX = Math.floor((W - (kw * notes.length + gap * (notes.length - 1))) / 2);
 
-        this.shapes = notes.map((note, i) => ({
-            id:       `shape_${i}`,
-            rect:     { x: startX + i * (kw + gap), y: startY, width: kw, height: kh },
-            points:   [],
-            note,
-            color:    SHAPE_COLORS[i % SHAPE_COLORS.length],
-            center:   { x: startX + i * (kw + gap) + kw / 2, y: startY + kh / 2 },
-            isActive: false,
-            area:     kw * kh
-        }));
+        this.shapes = notes.map((note, i) => {
+            const lx = startX + i * (kw + gap);
+            const ly = startY;
+            return {
+                id:       `shape_${i}`,
+                rect:     { x: lx, y: ly, width: kw, height: kh },
+                polygon:  [
+                    { x: lx,          y: ly },
+                    { x: lx + kw,     y: ly },
+                    { x: lx + kw,     y: ly + kh },
+                    { x: lx,          y: ly + kh }
+                ],
+                note,
+                color:    SHAPE_COLORS[i % SHAPE_COLORS.length],
+                center:   { x: lx + kw / 2, y: ly + kh / 2 },
+                textPos:  null,
+                isActive: false,
+                area:     kw * kh
+            };
+        });
 
         this.showPlayControls();
         this.status('Demo piano ready. Press Play!');
@@ -272,11 +303,9 @@ class PaperPianoApp {
         document.getElementById('btn-stop').classList.remove('hidden');
         document.getElementById('btn-clear').classList.remove('hidden');
 
-        if (this.hands.ready) {
-            this.status('🎵 Play mode — touch the shapes with your finger!');
-        } else {
-            this.status('🎵 Play mode — tap / click shapes to play (hand tracking unavailable).');
-        }
+        this.status(this.hands.ready
+            ? '🎵 Play mode — touch the shapes with your finger!'
+            : '🎵 Play mode — tap / click shapes to play (hand tracking unavailable).');
     }
 
     exitPlayMode() {
@@ -321,7 +350,6 @@ class PaperPianoApp {
         if (!shape) return;
 
         if (this.state === 'playing') {
-            // Quick click-to-play
             this.audio.init();
             this.audio.noteOn(shape.id, shape.note);
             shape.isActive = true;
@@ -350,7 +378,6 @@ class PaperPianoApp {
                 shape.isActive = true;
             }
         }
-        // Release shapes not in current touches
         for (const id of this.activeShapes) {
             if (!nowActive.has(id)) {
                 this.audio.noteOff(id);
@@ -372,16 +399,21 @@ class PaperPianoApp {
         const r = this.overlay.getBoundingClientRect();
         let x = (cx - r.left) * (this.overlay.width  / r.width);
         const y = (cy - r.top)  * (this.overlay.height / r.height);
-        // When mirrored, screen-left = internal-right
         if (this.mirrored) x = this.overlay.width - x;
         return { x, y };
     }
 
+    /**
+     * Hit test — point-in-polygon, with bounding-rect pre-filter for speed.
+     */
     shapeAt(x, y) {
-        return this.shapes.find(s =>
-            x >= s.rect.x && x <= s.rect.x + s.rect.width &&
-            y >= s.rect.y && y <= s.rect.y + s.rect.height
-        );
+        const pt = { x, y };
+        return this.shapes.find(s => {
+            // Quick bounding-rect rejection
+            if (!ShapeDetector.pointInRect(pt, s.rect)) return false;
+            // Precise polygon test
+            return ShapeDetector.pointInPolygon(pt, s.polygon);
+        });
     }
 
     // ── Note editor modal ──────────────────────────────────────────────────────
@@ -423,7 +455,7 @@ class PaperPianoApp {
         this.animId = requestAnimationFrame(loop);
     }
 
-    // ── Update (hand tracking + collision) ───────────────────────────────────
+    // ── Update (hand tracking + polygon collision) ────────────────────────────
     update(ts) {
         if (this.state !== 'playing' || !this.hands.ready) return;
 
@@ -435,7 +467,6 @@ class PaperPianoApp {
         const nowActive = new Set();
 
         for (const hand of fingers) {
-            // Check every fingertip
             for (const tip of hand.tips) {
                 const shape = this.shapeAt(tip.x, tip.y);
                 if (shape) {
@@ -447,7 +478,6 @@ class PaperPianoApp {
             }
         }
 
-        // Release shapes no longer active
         for (const id of this.activeShapes) {
             if (!nowActive.has(id)) {
                 this.audio.noteOff(id);
@@ -458,7 +488,7 @@ class PaperPianoApp {
         this.activeShapes = nowActive;
     }
 
-    // ── Draw ───────────────────────────────────────────────────────────────────
+    // ── Draw (contour-based rendering) ─────────────────────────────────────────
     draw() {
         const ctx = this.octx;
         const W   = this.overlay.width;
@@ -466,42 +496,61 @@ class PaperPianoApp {
 
         ctx.clearRect(0, 0, W, H);
 
-        // Mirror the entire scene for front-facing cameras so it feels natural
+        // Mirror for front-facing cameras
         ctx.save();
         if (this.mirrored) {
             ctx.translate(W, 0);
             ctx.scale(-1, 1);
         }
 
-        // Video frame as background
+        // Video background
         ctx.drawImage(this.video, 0, 0, W, H);
 
-        // ─ Shapes ──────────────────────────────────────────────────────────────
+        // ─ Draw shapes as filled/stroked polygons ──────────────────────────
         for (const s of this.shapes) {
-            const { rect, note, isActive, color } = s;
+            const { polygon, note, isActive, color, rect, textPos } = s;
 
-            // Fill
-            ctx.fillStyle = isActive ? (color + 'AA') : (color + '40');
-            ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+            if (polygon && polygon.length >= 3) {
+                // ── Filled polygon ─────────────────────────────────────────
+                ctx.beginPath();
+                ctx.moveTo(polygon[0].x, polygon[0].y);
+                for (let i = 1; i < polygon.length; i++) {
+                    ctx.lineTo(polygon[i].x, polygon[i].y);
+                }
+                ctx.closePath();
 
-            // Border
-            ctx.save();
-            if (isActive) {
-                ctx.shadowColor = color;
-                ctx.shadowBlur  = 22;
+                ctx.fillStyle = isActive ? (color + 'AA') : (color + '40');
+                ctx.fill();
+
+                // ── Stroked polygon border ─────────────────────────────────
+                ctx.save();
+                if (isActive) {
+                    ctx.shadowColor = color;
+                    ctx.shadowBlur  = 22;
+                }
+                ctx.strokeStyle = isActive ? '#FFF' : color;
+                ctx.lineWidth   = isActive ? 3 : 2;
+                ctx.stroke();
+                ctx.restore();
+            } else {
+                // Fallback to rect if no polygon
+                ctx.fillStyle = isActive ? (color + 'AA') : (color + '40');
+                ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+                ctx.save();
+                if (isActive) { ctx.shadowColor = color; ctx.shadowBlur = 22; }
+                ctx.strokeStyle = isActive ? '#FFF' : color;
+                ctx.lineWidth   = isActive ? 3 : 2;
+                ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+                ctx.restore();
             }
-            ctx.strokeStyle = isActive ? '#FFF' : color;
-            ctx.lineWidth   = isActive ? 3 : 2;
-            ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-            ctx.restore();
 
-            // Note label — un-mirror text so it reads correctly
-            const fz = Math.max(14, Math.min(rect.width, rect.height) * 0.45);
-            ctx.font          = `bold ${fz}px "Segoe UI", Arial, sans-serif`;
-            ctx.textAlign     = 'center';
-            ctx.textBaseline  = 'middle';
+            // ── Note label — un-mirror text ────────────────────────────────
             const cx = rect.x + rect.width  / 2;
             const cy = rect.y + rect.height / 2;
+            const fz = Math.max(14, Math.min(rect.width, rect.height) * 0.45);
+            ctx.font         = `bold ${fz}px "Segoe UI", Arial, sans-serif`;
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'middle';
 
             ctx.save();
             if (this.mirrored) {
@@ -514,14 +563,24 @@ class PaperPianoApp {
             ctx.fillStyle = isActive ? '#FFF' : '#EEE';
             ctx.fillText(note, cx, cy);
             ctx.restore();
+
+            // ── Debug: text anchor dot ──────────────────────────────────────
+            if (textPos) {
+                ctx.beginPath();
+                ctx.arc(textPos.x, textPos.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#FF0';
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
         }
 
-        // ─ Hand skeleton ───────────────────────────────────────────────────────
+        // ─ Hand skeleton ───────────────────────────────────────────────────
         if (this.state === 'playing' && this.lastHandRes?.landmarks) {
             for (const rawHand of this.lastHandRes.landmarks) {
                 const lm = rawHand.map(p => ({ x: p.x * W, y: p.y * H }));
 
-                // Connections
                 ctx.strokeStyle = 'rgba(0,255,136,0.35)';
                 ctx.lineWidth   = 1.5;
                 for (const [a, b] of HAND_CONNECTIONS) {
@@ -531,7 +590,6 @@ class PaperPianoApp {
                     ctx.stroke();
                 }
 
-                // Fingertips (larger dot for index)
                 const TIP_IDS = [4, 8, 12, 16, 20];
                 for (const ti of TIP_IDS) {
                     const r = ti === 8 ? 8 : 5;
@@ -546,8 +604,7 @@ class PaperPianoApp {
             }
         }
 
-        // Close the mirrored context
-        ctx.restore();
+        ctx.restore();   // close mirrored context
     }
 
     // ── FPS counter ────────────────────────────────────────────────────────────
