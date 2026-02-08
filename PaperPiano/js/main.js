@@ -64,6 +64,71 @@
     let activeHUD     = new Map();      // id → timeout handle
     let debounceMap   = new Map();      // shape id → timestamp of last release
 
+    /* ----------------------------------------------------------
+     * Tap detector — tracks fingertip vertical motion and fires
+     * a tap event when a quick downward movement is detected.
+     *
+     * For each finger (keyed by "hand:finger") we store a short
+     * history of y-positions.  A tap is recognised when:
+     *   1. The finger moved DOWN (y increased) significantly
+     *      over the last few frames (velocity > threshold).
+     *   2. On this frame the finger is inside a shape.
+     *
+     * After a tap fires we add a cooldown so the same finger
+     * can't re-trigger for a short period.
+     * ---------------------------------------------------------- */
+    const tapState = {};   // key → { yHist: number[], lastTapTime: number }
+
+    const TAP_HISTORY    = 4;      // frames of history to keep
+    const TAP_VEL_THRESH = 0.008;  // min downward y-delta (normalised) over history window
+    const TAP_COOLDOWN   = 250;    // ms before same finger can tap again
+    const TAP_SUSTAIN    = 300;    // ms to hold a note after tap
+
+    /**
+     * Update tap tracking for a single fingertip.
+     * @returns {boolean} true if a tap was just detected this frame
+     */
+    function updateTap (tip) {
+        const key = tip.hand + ':' + tip.finger;
+        const now = performance.now();
+
+        if (!tapState[key]) {
+            tapState[key] = { yHist: [tip.y], lastTapTime: 0 };
+            return false;
+        }
+
+        const st = tapState[key];
+        st.yHist.push(tip.y);
+        if (st.yHist.length > TAP_HISTORY) st.yHist.shift();
+
+        // Need at least 2 frames of history
+        if (st.yHist.length < 2) return false;
+
+        // Cooldown check
+        if (now - st.lastTapTime < TAP_COOLDOWN) return false;
+
+        // Compute downward velocity:  positive = moving down in screen coords
+        const oldest = st.yHist[0];
+        const newest = st.yHist[st.yHist.length - 1];
+        const vel    = newest - oldest;   // >0 means finger moved down
+
+        if (vel > TAP_VEL_THRESH) {
+            st.lastTapTime = now;
+            st.yHist.length = 0;          // reset so we don't re-trigger
+            return true;
+        }
+
+        return false;
+    }
+
+    /** Clean up tap state for fingers that disappeared. */
+    function pruneOldTaps (activeTips) {
+        const activeKeys = new Set(activeTips.map(t => t.hand + ':' + t.finger));
+        for (const key of Object.keys(tapState)) {
+            if (!activeKeys.has(key)) delete tapState[key];
+        }
+    }
+
     // FPS tracking
     let frameCount = 0;
     let lastFpsTime = performance.now();
@@ -147,34 +212,52 @@
         const tips = hands.getFingerTips();
         const cw   = $overlay.width;
         const ch   = $overlay.height;
-        // Sensitivity → extra hit-area padding (0-30 px)
         const pad  = (+$sensSlider.value / 100) * 30;
+        const now  = performance.now();
 
-        const pressed = notes.getPresses(tips, cw, ch, pad);
-        const curSet  = new Set(pressed.map(p => p.shape.id));
+        pruneOldTaps(tips);
 
-        const now = performance.now();
+        // For each visible fingertip, check for a tap gesture
+        for (const tip of tips) {
+            const tapped = updateTap(tip);
+            if (!tapped) continue;
 
-        // Notes ON — newly pressed (with debounce: ignore re-trigger within 100ms)
-        for (const p of pressed) {
-            if (!prevPressed.has(p.shape.id)) {
-                const lastOff = debounceMap.get(p.shape.id) || 0;
-                if (now - lastOff > 100) {
-                    audio.play(p.shape.id, p.shape.note, p.shape.instrument);
-                    showNoteHUD(p.shape);
+            // Finger just tapped — see which shape it's inside
+            const px   = tip.x * cw;
+            const py   = tip.y * ch;
+            const hits = notes.assignedShapes.filter(s => {
+                if (s.type === 'rectangle') {
+                    return px >= s.x - pad && px <= s.x + s.width + pad &&
+                           py >= s.y - pad && py <= s.y + s.height + pad;
+                } else if (s.type === 'circle') {
+                    return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
                 }
-            }
-        }
+                return false;
+            });
 
-        // Notes OFF — just released
-        for (const id of prevPressed) {
-            if (!curSet.has(id)) {
-                audio.stop(id);
-                debounceMap.set(id, now);
-            }
-        }
+            if (hits.length === 0) continue;
 
-        prevPressed = curSet;
+            // Resolve overlaps: highest priority, then smallest area
+            hits.sort((a, b) => {
+                if (a.priority !== b.priority) return b.priority - a.priority;
+                return a.area - b.area;
+            });
+
+            const shape = hits[0];
+
+            // Play note & schedule auto-stop after sustain period
+            audio.play(shape.id, shape.note, shape.instrument);
+            showNoteHUD(shape);
+            prevPressed.add(shape.id);
+
+            // Auto-release after TAP_SUSTAIN ms
+            const sid = shape.id;
+            debounceMap.set(sid, now);
+            setTimeout(() => {
+                audio.stop(sid);
+                prevPressed.delete(sid);
+            }, TAP_SUSTAIN);
+        }
     }
 
     /* ==============================================================
