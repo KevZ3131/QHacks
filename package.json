@@ -1,0 +1,20 @@
+{
+  "name": "paperpiano",
+  "version": "1.0.0",
+  "description": "Draw instruments on paper, point your camera, and play them with your fingers in real time.",
+  "scripts": {
+    "start": "live-server --port=8000 --entry-file=index.html",
+    "dev": "live-server --port=8000 --entry-file=index.html"
+  },
+  "keywords": [
+    "hackathon",
+    "piano",
+    "mediapipe",
+    "opencv",
+    "web-audio"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "live-server": "^1.2.2"
+  }
+}

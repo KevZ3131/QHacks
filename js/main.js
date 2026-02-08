@@ -11,66 +11,65 @@
     /* ==============================================================
        DOM handles
        ============================================================== */
-    const $splash        = document.getElementById('splash');
-    const $app           = document.getElementById('app');
-    const $startBtn      = document.getElementById('startBtn');
+    const $splash = document.getElementById('splash');
+    const $app = document.getElementById('app');
+    const $startBtn = document.getElementById('startBtn');
 
-    const $video         = document.getElementById('video');
-    const $overlay       = document.getElementById('overlay');
-    const $loadingOvr    = document.getElementById('loadingOverlay');
-    const $loadingTxt    = document.getElementById('loadingText');
+    const $video = document.getElementById('video');
+    const $overlay = document.getElementById('overlay');
+    const $loadingOvr = document.getElementById('loadingOverlay');
+    const $loadingTxt = document.getElementById('loadingText');
 
-    const $scanBtn       = document.getElementById('scanBtn');
-    const $autoScanBtn   = document.getElementById('autoScanBtn');
-    const $mirrorBtn     = document.getElementById('mirrorBtn');
+    const $scanBtn = document.getElementById('scanBtn');
+    const $autoScanBtn = document.getElementById('autoScanBtn');
+    const $mirrorBtn = document.getElementById('mirrorBtn');
 
-    const $octaveSlider  = document.getElementById('octaveSlider');
-    const $octaveVal     = document.getElementById('octaveVal');
-    const $sensSlider    = document.getElementById('sensitivitySlider');
+    const $octaveSlider = document.getElementById('octaveSlider');
+    const $octaveVal = document.getElementById('octaveVal');
+    const $sensSlider = document.getElementById('sensitivitySlider');
 
-    const $debugBtn      = document.getElementById('debugBtn');
-    const $debugPanel    = document.getElementById('debugPanel');
-    const $debugCanvas   = document.getElementById('debugCanvas');
-    const $debugInfo     = document.getElementById('debugInfo');
+    const $debugBtn = document.getElementById('debugBtn');
+    const $debugPanel = document.getElementById('debugPanel');
+    const $debugCanvas = document.getElementById('debugCanvas');
+    const $debugInfo = document.getElementById('debugInfo');
 
-    const $noteHUD       = document.getElementById('noteHUD');
-    const $shapeBadge    = document.getElementById('shapeBadge');
-    const $keyCount      = document.getElementById('keyCount');
-    const $padCount      = document.getElementById('padCount');
-    const $fpsEl         = document.getElementById('fps');
+    const $noteHUD = document.getElementById('noteHUD');
+    const $shapeBadge = document.getElementById('shapeBadge');
+    const $keyCount = document.getElementById('keyCount');
+    const $padCount = document.getElementById('padCount');
+    const $fpsEl = document.getElementById('fps');
 
-    const $camDot        = document.querySelector('#cameraStatus .dot');
-    const $handDot       = document.querySelector('#handStatus .dot');
-    const $cvDot         = document.querySelector('#cvStatus .dot');
+    const $camDot = document.querySelector('#cameraStatus .dot');
+    const $handDot = document.querySelector('#handStatus .dot');
+    const $cvDot = document.querySelector('#cvStatus .dot');
 
     /* ==============================================================
        Subsystems
        ============================================================== */
-    const audio  = new AudioEngine();
-    const hands  = new HandTracker();
+    const audio = new AudioEngine();
+    const hands = new HandTracker();
     const shapes = new ShapeDetector();
-    const notes  = new NoteRecognizer();
-    const gemini = new GeminiDetector();
+    const notes = new NoteRecognizer();
 
     /* ==============================================================
        State
        ============================================================== */
-    let running       = false;
-    let mirrored      = false;
-    let autoScan      = false;
+    let running = false;
+    let mirrored = false;
+    let autoScan = false;
     let autoScanTimer = null;
-    let isScanning    = false;   // guard against concurrent Gemini calls
-    let showDebug     = false;
+    let isScanning = false;   // guard against concurrent scans
+    let showDebug = false;
 
-    let prevPressed   = new Set();      // shape ids currently held
-    let activeHUD     = new Map();      // id → timeout handle
-    let debounceMap   = new Map();      // shape id → timestamp of last release
+    let prevPressed = new Set();      // shape ids currently held
+    let activeHUD = new Map();      // id → timeout handle
+    let debounceMap = new Map();      // shape id → timestamp of last release
 
     /* ----------------------------------------------------------
      * Point-in-polygon test (ray casting algorithm)
      * pad = extra tolerance in pixels around the polygon edges
      * ---------------------------------------------------------- */
-    function pointInPolygon (px, py, points, pad) {
+    function pointInPolygon(px, py, points, pad) {
         // Quick bounding-box pre-check with padding
         const xs = points.map(p => p.x);
         const ys = points.map(p => p.y);
@@ -99,7 +98,7 @@
     }
 
     /** Distance from point to line segment */
-    function distToSegment (px, py, a, b) {
+    function distToSegment(px, py, a, b) {
         const dx = b.x - a.x, dy = b.y - a.y;
         const len2 = dx * dx + dy * dy;
         if (len2 === 0) return Math.hypot(px - a.x, py - a.y);
@@ -112,7 +111,7 @@
      * syncOverlay — positions the overlay canvas to match the
      * video's actual rendered area (accounting for object-fit).
      * ---------------------------------------------------------- */
-    function syncOverlay () {
+    function syncOverlay() {
         if (!$video.videoWidth || !$video.videoHeight) return;
 
         const container = $video.parentElement.getBoundingClientRect();
@@ -120,7 +119,7 @@
         const vidH = $video.videoHeight;
 
         const containerAR = container.width / container.height;
-        const videoAR     = vidW / vidH;
+        const videoAR = vidW / vidH;
 
         let renderW, renderH, offsetX, offsetY;
 
@@ -138,9 +137,9 @@
             offsetY = 0;
         }
 
-        $overlay.style.left   = offsetX + 'px';
-        $overlay.style.top    = offsetY + 'px';
-        $overlay.style.width  = renderW + 'px';
+        $overlay.style.left = offsetX + 'px';
+        $overlay.style.top = offsetY + 'px';
+        $overlay.style.width = renderW + 'px';
         $overlay.style.height = renderH + 'px';
     }
 
@@ -159,16 +158,16 @@
      * ---------------------------------------------------------- */
     const tapState = {};   // key → { yHist: number[], lastTapTime: number }
 
-    const TAP_HISTORY    = 4;      // frames of history to keep
+    const TAP_HISTORY = 4;      // frames of history to keep
     const TAP_VEL_THRESH = 0.008;  // min downward y-delta (normalised) over history window
-    const TAP_COOLDOWN   = 250;    // ms before same finger can tap again
-    const TAP_SUSTAIN    = 300;    // ms to hold a note after tap
+    const TAP_COOLDOWN = 250;    // ms before same finger can tap again
+    const TAP_SUSTAIN = 300;    // ms to hold a note after tap
 
     /**
      * Update tap tracking for a single fingertip.
      * @returns {boolean} true if a tap was just detected this frame
      */
-    function updateTap (tip) {
+    function updateTap(tip) {
         const key = tip.hand + ':' + tip.finger;
         const now = performance.now();
 
@@ -190,7 +189,7 @@
         // Compute downward velocity:  positive = moving down in screen coords
         const oldest = st.yHist[0];
         const newest = st.yHist[st.yHist.length - 1];
-        const vel    = newest - oldest;   // >0 means finger moved down
+        const vel = newest - oldest;   // >0 means finger moved down
 
         if (vel > TAP_VEL_THRESH) {
             st.lastTapTime = now;
@@ -202,7 +201,7 @@
     }
 
     /** Clean up tap state for fingers that disappeared. */
-    function pruneOldTaps (activeTips) {
+    function pruneOldTaps(activeTips) {
         const activeKeys = new Set(activeTips.map(t => t.hand + ':' + t.finger));
         for (const key of Object.keys(tapState)) {
             if (!activeKeys.has(key)) delete tapState[key];
@@ -223,14 +222,14 @@
         await boot();
     });
 
-    async function boot () {
+    async function boot() {
         try {
             /* ---- camera ---- */
             setLoading('Starting camera…');
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width:      { ideal: 1280 },
-                    height:     { ideal: 720 },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
                     facingMode: 'environment',
                 },
                 audio: false,
@@ -240,7 +239,7 @@
             $camDot.classList.add('ok');
 
             // Match canvas to video native resolution
-            $overlay.width  = $video.videoWidth;
+            $overlay.width = $video.videoWidth;
             $overlay.height = $video.videoHeight;
             syncOverlay();
             window.addEventListener('resize', syncOverlay);
@@ -272,7 +271,7 @@
        ============================================================== */
     const octx = $overlay.getContext('2d');
 
-    function frame () {
+    function frame() {
         if (!running) { requestAnimationFrame(frame); return; }
 
         // Send frame to hand tracker (non-blocking)
@@ -290,12 +289,12 @@
     /* ==============================================================
        Interaction: finger → shape → sound
        ============================================================== */
-    function processInteraction () {
+    function processInteraction() {
         const tips = hands.getFingerTips();
-        const cw   = $overlay.width;
-        const ch   = $overlay.height;
-        const pad  = (+$sensSlider.value / 100) * 30;
-        const now  = performance.now();
+        const cw = $overlay.width;
+        const ch = $overlay.height;
+        const pad = (+$sensSlider.value / 100) * 30;
+        const now = performance.now();
 
         pruneOldTaps(tips);
 
@@ -305,8 +304,8 @@
             if (!tapped) continue;
 
             // Finger just tapped — see which shape it's inside
-            const px   = tip.x * cw;
-            const py   = tip.y * ch;
+            const px = tip.x * cw;
+            const py = tip.y * ch;
             const hits = notes.assignedShapes.filter(s => {
                 // Use polygon hit-test if shape has points
                 if (s.points && s.points.length >= 3) {
@@ -314,12 +313,12 @@
                 }
                 if (s.type === 'rectangle') {
                     return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
+                        py >= s.y - pad && py <= s.y + s.height + pad;
                 } else if (s.type === 'circle') {
                     return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
                 } else if (s.type === 'triangle') {
                     return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
+                        py >= s.y - pad && py <= s.y + s.height + pad;
                 }
                 return false;
             });
@@ -352,13 +351,13 @@
     /* ==============================================================
        Drawing overlay
        ============================================================== */
-    function draw () {
+    function draw() {
         const cw = $overlay.width;
         const ch = $overlay.height;
         octx.clearRect(0, 0, cw, ch);
 
-        // ---- draw paper outline (Gemini or OpenCV) ----
-        const paperPts = gemini.ready ? gemini.getPaperOutline() : shapes.getPaperOutline();
+        // ---- draw paper outline ----
+        const paperPts = shapes.getPaperOutline();
         if (paperPts && paperPts.length >= 3) {
             octx.beginPath();
             octx.moveTo(paperPts[0].x, paperPts[0].y);
@@ -367,7 +366,7 @@
             }
             octx.closePath();
             octx.strokeStyle = 'rgba(0,255,180,0.55)';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.setLineDash([8, 6]);
             octx.stroke();
             octx.setLineDash([]);
@@ -375,31 +374,31 @@
 
         // ---- draw shapes ----
         for (const s of notes.assignedShapes) {
-            const active   = prevPressed.has(s.id);
-            const editing  = editingShape && editingShape.id === s.id;
+            const active = prevPressed.has(s.id);
+            const editing = editingShape && editingShape.id === s.id;
 
             // Choose colors based on type and state
             let strokeColor, fillColor;
             if (active) {
                 strokeColor = '#FF5722';
-                fillColor   = 'rgba(255,87,34,0.30)';
+                fillColor = 'rgba(255,87,34,0.30)';
             } else if (editing) {
                 strokeColor = '#FFD600';
-                fillColor   = 'rgba(255,214,0,0.18)';
+                fillColor = 'rgba(255,214,0,0.18)';
             } else if (s.type === 'circle') {
                 strokeColor = 'rgba(76,175,80,0.8)';
-                fillColor   = 'rgba(76,175,80,0.12)';
+                fillColor = 'rgba(76,175,80,0.12)';
             } else if (s.type === 'triangle') {
                 strokeColor = 'rgba(255,152,0,0.8)';
-                fillColor   = 'rgba(255,152,0,0.12)';
+                fillColor = 'rgba(255,152,0,0.12)';
             } else {
                 strokeColor = s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)';
-                fillColor   = s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)';
+                fillColor = s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)';
             }
 
-            octx.lineWidth   = (active || editing) ? 4 : 2;
+            octx.lineWidth = (active || editing) ? 4 : 2;
             octx.strokeStyle = strokeColor;
-            octx.fillStyle   = fillColor;
+            octx.fillStyle = fillColor;
 
             // Draw polygon if available, else fallback to bounding box
             if (s.points && s.points.length >= 3) {
@@ -424,13 +423,13 @@
             // Note label
             const tx = s.centerX || s.x + s.width / 2;
             const ty = s.centerY || s.y + s.height / 2;
-            octx.font         = `bold ${active ? 22 : 17}px sans-serif`;
-            octx.textAlign    = 'center';
+            octx.font = `bold ${active ? 22 : 17}px sans-serif`;
+            octx.textAlign = 'center';
             octx.textBaseline = 'middle';
-            octx.strokeStyle  = 'rgba(0,0,0,0.7)';
-            octx.lineWidth    = 3;
+            octx.strokeStyle = 'rgba(0,0,0,0.7)';
+            octx.lineWidth = 3;
             octx.strokeText(s.note, tx, ty);
-            octx.fillStyle    = active ? '#FFF' : '#e0e0ff';
+            octx.fillStyle = active ? '#FFF' : '#e0e0ff';
             octx.fillText(s.note, tx, ty);
         }
 
@@ -441,10 +440,10 @@
             const y = t.y * ch;
             octx.beginPath();
             octx.arc(x, y, 9, 0, Math.PI * 2);
-            octx.fillStyle   = 'rgba(255,60,60,0.6)';
+            octx.fillStyle = 'rgba(255,60,60,0.6)';
             octx.fill();
             octx.strokeStyle = '#fff';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.stroke();
         }
 
@@ -460,9 +459,9 @@
     }
 
     /* ==============================================================
-       Shape scanning — Gemini AI first, OpenCV fallback
+       Shape scanning — OpenCV
        ============================================================== */
-    async function scanShapes () {
+    async function scanShapes() {
         // Prevent concurrent scans — if one is already in-flight, skip
         if (isScanning) {
             console.log('[Scan] already scanning, skipping');
@@ -470,89 +469,37 @@
         }
         isScanning = true;
 
-        const oct    = +$octaveSlider.value;
+        const oct = +$octaveSlider.value;
         const dbgCvs = showDebug ? $debugCanvas : null;
 
         console.log('[Scan] scanning shapes… octave=' + oct);
 
-        let raw;
-        let method = 'opencv';
-
-        // --- Try Gemini AI first ---
-        if (gemini.ready) {
-            method = 'gemini';
-            try {
-                // Show scanning indicator
-                if ($scanBtn) {
-                    $scanBtn.disabled = true;
-                    $scanBtn.textContent = '🤖 Scanning…';
-                }
-                raw = await gemini.detect($video);
-                console.log('[Scan] Gemini succeeded:', raw);
-            } catch (e) {
-                console.error('[Scan] Gemini failed:', e);
-                method = 'opencv (fallback)';
-                raw = null;
-                // Show error on debug panel
-                $debugInfo.textContent = 'Gemini error: ' + e.message +
-                    (gemini.lastResponse ? '\n\nRaw response:\n' + gemini.lastResponse : '');
-            } finally {
-                if ($scanBtn) {
-                    $scanBtn.disabled = false;
-                    $scanBtn.textContent = '📷 Scan Paper';
-                }
-            }
-        }
-
-        // --- OpenCV fallback ---
-        if (!raw) {
-            raw = shapes.detect($video, dbgCvs);
-        }
+        const raw = shapes.detect($video, dbgCvs);
 
         // --- Assign notes ---
         const assigned = notes.assignNotes(raw, oct);
 
-        // If Gemini found triangles, add them as special pads
-        if (raw.triangles && raw.triangles.length > 0) {
-            const TRI_SOUNDS = ['crash', 'hihat', 'tom1', 'tom2'];
-            raw.triangles
-                .sort((a, b) => a.centerX - b.centerX)
-                .forEach((t, i) => {
-                    assigned.push(Object.assign({}, t, {
-                        id:         't' + i,
-                        note:       TRI_SOUNDS[i % TRI_SOUNDS.length],
-                        instrument: 'drums',
-                        priority:   0,
-                    }));
-                });
-            notes.assignedShapes = assigned;
-        }
-
         const nKeys = assigned.filter(s => s.type === 'rectangle').length;
         const nPads = assigned.filter(s => s.type === 'circle').length;
-        const nTris = assigned.filter(s => s.type === 'triangle').length;
 
         $keyCount.textContent = nKeys;
         $padCount.textContent = nPads;
-        $shapeBadge.classList.toggle('hidden', nKeys + nPads + nTris === 0);
+        $shapeBadge.classList.toggle('hidden', nKeys + nPads === 0);
 
         // Debug info
-        const log = method.startsWith('gemini')
-            ? (gemini.lastLog || '(no log)')
-            : (shapes.lastLog || '(no strategies ran)');
+        const log = shapes.lastLog || '(no strategies ran)';
         $debugInfo.textContent =
-            `Method: ${method}\n` +
+            `Method: opencv\n` +
             `${log}\n` +
-            `Detected → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}` +
-            `  Triangles: ${(raw.triangles || []).length}\n` +
+            `Detected → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}\n` +
             `Assigned: ${assigned.length} shapes\n` +
             assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})${s.points ? ' [' + s.points.length + ' pts]' : ''}`).join('\n');
 
-        if (nKeys + nPads + nTris === 0) {
+        if (nKeys + nPads === 0) {
             console.warn('[Scan] No shapes found.');
         }
 
-        console.log(`[Scan] ${method} | paper: ${method.startsWith('gemini') ? !!gemini.paperCorners : !!shapes.paperContour}`);
+        console.log(`[Scan] opencv | paper: ${!!shapes.paperContour}`);
 
         isScanning = false;
     }
@@ -561,35 +508,6 @@
        UI wiring
        ============================================================== */
     $scanBtn.addEventListener('click', scanShapes);
-
-    // ---- Gemini API key ----
-    const $geminiKey    = document.getElementById('gemini-key');
-    const $geminiStatus = document.getElementById('gemini-status');
-
-    if ($geminiKey) {
-        // Restore saved key from localStorage
-        const savedKey = localStorage.getItem('gemini_api_key');
-        if (savedKey) {
-            $geminiKey.value = savedKey;
-            gemini.setApiKey(savedKey);
-            if ($geminiStatus) $geminiStatus.textContent = '🤖 AI ON';
-            if ($geminiStatus) $geminiStatus.classList.add('active');
-        }
-
-        $geminiKey.addEventListener('change', () => {
-            const key = $geminiKey.value.trim();
-            gemini.setApiKey(key);
-            if (key) {
-                localStorage.setItem('gemini_api_key', key);
-                if ($geminiStatus) { $geminiStatus.textContent = '🤖 AI ON'; $geminiStatus.classList.add('active'); }
-                console.log('[Gemini] API key set — AI shape detection enabled');
-            } else {
-                localStorage.removeItem('gemini_api_key');
-                if ($geminiStatus) { $geminiStatus.textContent = '🤖 OFF'; $geminiStatus.classList.remove('active'); }
-                console.log('[Gemini] API key cleared — using OpenCV fallback');
-            }
-        });
-    }
 
     $autoScanBtn.addEventListener('click', () => {
         autoScan = !autoScan;
@@ -610,9 +528,9 @@
 
     $octaveSlider.addEventListener('input', () => {
         $octaveVal.textContent = $octaveSlider.value;
-        // Re-assign notes at new octave — reuse existing shapes, no new API call
+        // Re-assign notes at new octave — reuse existing shapes
         if (notes.assignedShapes.length) {
-            const lastRaw = gemini.lockedShapes || shapes.lastResult || null;
+            const lastRaw = shapes.lastResult || null;
             if (lastRaw) {
                 notes.assignNotes(lastRaw, +$octaveSlider.value);
             }
@@ -628,34 +546,34 @@
     /* ==============================================================
        Shape Editor — click a shape on the overlay to change its sound
        ============================================================== */
-    const $shapeEditor  = document.getElementById('shapeEditor');
-    const $editorTitle  = document.getElementById('editorTitle');
-    const $editorBody   = document.getElementById('editorBody');
-    const $editorClose  = document.getElementById('editorClose');
+    const $shapeEditor = document.getElementById('shapeEditor');
+    const $editorTitle = document.getElementById('editorTitle');
+    const $editorBody = document.getElementById('editorBody');
+    const $editorClose = document.getElementById('editorClose');
 
-    let editingShape    = null;  // reference into notes.assignedShapes
+    let editingShape = null;  // reference into notes.assignedShapes
 
     // All chromatic notes across one octave
-    const ALL_NOTES     = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    const DRUM_OPTIONS  = ['kick','snare','hihat','tom1','tom2','crash'];
+    const ALL_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const DRUM_OPTIONS = ['kick', 'snare', 'hihat', 'tom1', 'tom2', 'crash'];
 
     /** Convert overlay-canvas click to video-pixel coordinates. */
-    function overlayClickToVideoPx (e) {
+    function overlayClickToVideoPx(e) {
         const rect = $overlay.getBoundingClientRect();
-        const scaleX = $overlay.width  / rect.width;
+        const scaleX = $overlay.width / rect.width;
         const scaleY = $overlay.height / rect.height;
         return {
             x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top)  * scaleY,
+            y: (e.clientY - rect.top) * scaleY,
         };
     }
 
     /** Hit-test a click against assigned shapes (same priority rules as finger presses). */
-    function hitTestShapes (px, py) {
+    function hitTestShapes(px, py) {
         const hits = notes.assignedShapes.filter(s => {
             if (s.type === 'rectangle') {
                 return px >= s.x && px <= s.x + s.width &&
-                       py >= s.y && py <= s.y + s.height;
+                    py >= s.y && py <= s.y + s.height;
             } else if (s.type === 'circle') {
                 return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius;
             }
@@ -670,25 +588,25 @@
     }
 
     /** Open the editor popup anchored near the click position. */
-    function openEditor (shape, clickEvt) {
+    function openEditor(shape, clickEvt) {
         editingShape = shape;
         $shapeEditor.classList.remove('hidden');
 
         // Position: near the click, but keep inside the camera container
         const container = document.getElementById('cameraContainer');
-        const cRect     = container.getBoundingClientRect();
+        const cRect = container.getBoundingClientRect();
         let left = clickEvt.clientX - cRect.left + 12;
-        let top  = clickEvt.clientY - cRect.top  + 12;
+        let top = clickEvt.clientY - cRect.top + 12;
 
         // Clamp so popup doesn't overflow
         const edW = 260, edH = 240;
-        if (left + edW > cRect.width)  left = cRect.width  - edW - 8;
-        if (top  + edH > cRect.height) top  = cRect.height - edH - 8;
+        if (left + edW > cRect.width) left = cRect.width - edW - 8;
+        if (top + edH > cRect.height) top = cRect.height - edH - 8;
         if (left < 4) left = 4;
-        if (top  < 4) top  = 4;
+        if (top < 4) top = 4;
 
         $shapeEditor.style.left = left + 'px';
-        $shapeEditor.style.top  = top  + 'px';
+        $shapeEditor.style.top = top + 'px';
 
         // Build content based on instrument type
         if (shape.instrument === 'piano') {
@@ -698,7 +616,7 @@
         }
     }
 
-    function closeEditor () {
+    function closeEditor() {
         $shapeEditor.classList.add('hidden');
         editingShape = null;
     }
@@ -713,10 +631,10 @@
     });
 
     /** Build a piano-note picker (chromatic, with octave selector). */
-    function buildPianoEditor (shape) {
+    function buildPianoEditor(shape) {
         // Parse current note & octave
         const curBase = shape.note.replace(/\d+$/, '');
-        const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+        const curOct = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
 
         $editorTitle.textContent = '🎹 Piano Key — ' + shape.id;
 
@@ -735,7 +653,7 @@
         html += '<div class="editor-section-label">Note</div>';
         html += '<div class="editor-grid">';
         for (const n of ALL_NOTES) {
-            const sel   = n === curBase ? ' selected' : '';
+            const sel = n === curBase ? ' selected' : '';
             const sharp = n.includes('#') ? ' sharp' : '';
             html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
         }
@@ -767,7 +685,7 @@
     }
 
     /** Build a drum-type picker. */
-    function buildDrumEditor (shape) {
+    function buildDrumEditor(shape) {
         $editorTitle.textContent = '🥁 Drum Pad — ' + shape.id;
 
         let html = '<div class="editor-section-label">Drum Sound</div>';
@@ -808,7 +726,7 @@
     /* ==============================================================
        HUD (floating note names on play)
        ============================================================== */
-    function showNoteHUD (shape) {
+    function showNoteHUD(shape) {
         // Remove old bubble for this id if it exists
         if (activeHUD.has(shape.id)) {
             clearTimeout(activeHUD.get(shape.id).timer);
@@ -825,11 +743,11 @@
     /* ==============================================================
        Helpers
        ============================================================== */
-    function setLoading (msg) {
+    function setLoading(msg) {
         $loadingTxt.textContent = msg;
     }
 
-    function waitForOpenCV () {
+    function waitForOpenCV() {
         return new Promise((resolve) => {
             console.log('[OpenCV] waiting for cv to load…');
 
@@ -847,7 +765,7 @@
                 resolve();
             }, 45000);
 
-            function onReady () {
+            function onReady() {
                 clearInterval(poll);
                 clearTimeout(timeout);
                 console.log('[OpenCV] runtime ready — cv.Mat exists:', typeof cv.Mat === 'function');
@@ -891,7 +809,7 @@
         });
     }
 
-    function updateFPS () {
+    function updateFPS() {
         frameCount++;
         const now = performance.now();
         if (now - lastFpsTime >= 1000) {
