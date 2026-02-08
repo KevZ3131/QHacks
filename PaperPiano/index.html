@@ -84,6 +84,13 @@
                 </label>
                 <button id="debugBtn" class="btn-ctrl btn-small">Debug</button>
             </div>
+
+            <div class="controls-row">
+                <!-- Gemini AI shape detection -->
+                <input id="gemini-key" type="password" placeholder="Gemini API Key"
+                       class="api-key-input" title="Paste your Gemini API key for AI-powered shape detection">
+                <span id="gemini-status" class="gemini-badge" title="Gemini AI status">🤖 OFF</span>
+            </div>
         </div>
 
         <!-- Active-note heads-up -->
@@ -130,6 +137,7 @@
     <script src="js/hand-tracker.js"></script>
     <script src="js/shape-detector.js"></script>
     <script src="js/note-recognizer.js"></script>
+    <script src="js/gemini-detector.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

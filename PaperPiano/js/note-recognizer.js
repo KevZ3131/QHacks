@@ -180,6 +180,9 @@ class NoteRecognizer {
                     const dx = px - s.centerX;
                     const dy = py - s.centerY;
                     return Math.hypot(dx, dy) <= s.radius + pad;
+                } else if (s.type === 'triangle') {
+                    return px >= s.x - pad && px <= s.x + s.width + pad &&
+                           py >= s.y - pad && py <= s.y + s.height + pad;
                 }
                 return false;
             });

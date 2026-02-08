@@ -50,6 +50,7 @@
     const hands  = new HandTracker();
     const shapes = new ShapeDetector();
     const notes  = new NoteRecognizer();
+    const gemini = new GeminiDetector();
 
     /* ==============================================================
        State
@@ -58,11 +59,90 @@
     let mirrored      = false;
     let autoScan      = false;
     let autoScanTimer = null;
+    let isScanning    = false;   // guard against concurrent Gemini calls
     let showDebug     = false;
 
     let prevPressed   = new Set();      // shape ids currently held
     let activeHUD     = new Map();      // id → timeout handle
     let debounceMap   = new Map();      // shape id → timestamp of last release
+
+    /* ----------------------------------------------------------
+     * Point-in-polygon test (ray casting algorithm)
+     * pad = extra tolerance in pixels around the polygon edges
+     * ---------------------------------------------------------- */
+    function pointInPolygon (px, py, points, pad) {
+        // Quick bounding-box pre-check with padding
+        const xs = points.map(p => p.x);
+        const ys = points.map(p => p.y);
+        const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+        const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+        if (px < minX || px > maxX || py < minY || py > maxY) return false;
+
+        // Ray casting
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+            const xi = points[i].x, yi = points[i].y;
+            const xj = points[j].x, yj = points[j].y;
+            if (((yi > py) !== (yj > py)) &&
+                (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+                inside = !inside;
+            }
+        }
+        // If not inside but within padding distance, still count as hit
+        if (!inside && pad > 0) {
+            for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                const dist = distToSegment(px, py, points[j], points[i]);
+                if (dist <= pad) return true;
+            }
+        }
+        return inside;
+    }
+
+    /** Distance from point to line segment */
+    function distToSegment (px, py, a, b) {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy;
+        if (len2 === 0) return Math.hypot(px - a.x, py - a.y);
+        let t = ((px - a.x) * dx + (py - a.y) * dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+    }
+
+    /* ----------------------------------------------------------
+     * syncOverlay — positions the overlay canvas to match the
+     * video's actual rendered area (accounting for object-fit).
+     * ---------------------------------------------------------- */
+    function syncOverlay () {
+        if (!$video.videoWidth || !$video.videoHeight) return;
+
+        const container = $video.parentElement.getBoundingClientRect();
+        const vidW = $video.videoWidth;
+        const vidH = $video.videoHeight;
+
+        const containerAR = container.width / container.height;
+        const videoAR     = vidW / vidH;
+
+        let renderW, renderH, offsetX, offsetY;
+
+        if (videoAR > containerAR) {
+            // Video is wider → letterbox top/bottom
+            renderW = container.width;
+            renderH = container.width / videoAR;
+            offsetX = 0;
+            offsetY = (container.height - renderH) / 2;
+        } else {
+            // Video is taller → letterbox left/right
+            renderH = container.height;
+            renderW = container.height * videoAR;
+            offsetX = (container.width - renderW) / 2;
+            offsetY = 0;
+        }
+
+        $overlay.style.left   = offsetX + 'px';
+        $overlay.style.top    = offsetY + 'px';
+        $overlay.style.width  = renderW + 'px';
+        $overlay.style.height = renderH + 'px';
+    }
 
     /* ----------------------------------------------------------
      * Tap detector — tracks fingertip vertical motion and fires
@@ -162,6 +242,8 @@
             // Match canvas to video native resolution
             $overlay.width  = $video.videoWidth;
             $overlay.height = $video.videoHeight;
+            syncOverlay();
+            window.addEventListener('resize', syncOverlay);
 
             /* ---- hand tracker ---- */
             setLoading('Loading hand-tracking model… (may take a moment)');
@@ -226,11 +308,18 @@
             const px   = tip.x * cw;
             const py   = tip.y * ch;
             const hits = notes.assignedShapes.filter(s => {
+                // Use polygon hit-test if shape has points
+                if (s.points && s.points.length >= 3) {
+                    return pointInPolygon(px, py, s.points, pad);
+                }
                 if (s.type === 'rectangle') {
                     return px >= s.x - pad && px <= s.x + s.width + pad &&
                            py >= s.y - pad && py <= s.y + s.height + pad;
                 } else if (s.type === 'circle') {
                     return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
+                } else if (s.type === 'triangle') {
+                    return px >= s.x - pad && px <= s.x + s.width + pad &&
+                           py >= s.y - pad && py <= s.y + s.height + pad;
                 }
                 return false;
             });
@@ -268,8 +357,8 @@
         const ch = $overlay.height;
         octx.clearRect(0, 0, cw, ch);
 
-        // ---- draw paper outline ----
-        const paperPts = shapes.getPaperOutline();
+        // ---- draw paper outline (Gemini or OpenCV) ----
+        const paperPts = gemini.ready ? gemini.getPaperOutline() : shapes.getPaperOutline();
         if (paperPts && paperPts.length >= 3) {
             octx.beginPath();
             octx.moveTo(paperPts[0].x, paperPts[0].y);
@@ -289,29 +378,52 @@
             const active   = prevPressed.has(s.id);
             const editing  = editingShape && editingShape.id === s.id;
 
-            if (s.type === 'rectangle') {
-                octx.lineWidth   = (active || editing) ? 4 : 2;
-                octx.strokeStyle = active ? '#FF5722'
-                    : editing ? '#FFD600'
-                    : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)'
-                    : editing ? 'rgba(255,214,0,0.18)'
-                    : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
-                octx.fillRect(s.x, s.y, s.width, s.height);
-                octx.strokeRect(s.x, s.y, s.width, s.height);
+            // Choose colors based on type and state
+            let strokeColor, fillColor;
+            if (active) {
+                strokeColor = '#FF5722';
+                fillColor   = 'rgba(255,87,34,0.30)';
+            } else if (editing) {
+                strokeColor = '#FFD600';
+                fillColor   = 'rgba(255,214,0,0.18)';
+            } else if (s.type === 'circle') {
+                strokeColor = 'rgba(76,175,80,0.8)';
+                fillColor   = 'rgba(76,175,80,0.12)';
+            } else if (s.type === 'triangle') {
+                strokeColor = 'rgba(255,152,0,0.8)';
+                fillColor   = 'rgba(255,152,0,0.12)';
+            } else {
+                strokeColor = s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)';
+                fillColor   = s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)';
+            }
+
+            octx.lineWidth   = (active || editing) ? 4 : 2;
+            octx.strokeStyle = strokeColor;
+            octx.fillStyle   = fillColor;
+
+            // Draw polygon if available, else fallback to bounding box
+            if (s.points && s.points.length >= 3) {
+                octx.beginPath();
+                octx.moveTo(s.points[0].x, s.points[0].y);
+                for (let i = 1; i < s.points.length; i++) {
+                    octx.lineTo(s.points[i].x, s.points[i].y);
+                }
+                octx.closePath();
+                octx.fill();
+                octx.stroke();
             } else if (s.type === 'circle') {
                 octx.beginPath();
                 octx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
-                octx.lineWidth   = (active || editing) ? 4 : 2;
-                octx.strokeStyle = active ? '#FF5722' : editing ? '#FFD600' : 'rgba(76,175,80,0.8)';
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
                 octx.fill();
                 octx.stroke();
+            } else {
+                octx.fillRect(s.x, s.y, s.width, s.height);
+                octx.strokeRect(s.x, s.y, s.width, s.height);
             }
 
             // Note label
-            const tx = s.type === 'circle' ? s.centerX : s.x + s.width / 2;
-            const ty = s.type === 'circle' ? s.centerY : s.y + s.height / 2;
+            const tx = s.centerX || s.x + s.width / 2;
+            const ty = s.centerY || s.y + s.height / 2;
             octx.font         = `bold ${active ? 22 : 17}px sans-serif`;
             octx.textAlign    = 'center';
             octx.textBaseline = 'middle';
@@ -348,36 +460,101 @@
     }
 
     /* ==============================================================
-       Shape scanning
+       Shape scanning — Gemini AI first, OpenCV fallback
        ============================================================== */
-    function scanShapes () {
+    async function scanShapes () {
+        // Prevent concurrent scans — if one is already in-flight, skip
+        if (isScanning) {
+            console.log('[Scan] already scanning, skipping');
+            return;
+        }
+        isScanning = true;
+
         const oct    = +$octaveSlider.value;
-        // Always pass debug canvas so we can inspect threshold if needed
         const dbgCvs = showDebug ? $debugCanvas : null;
 
         console.log('[Scan] scanning shapes… octave=' + oct);
-        const raw    = shapes.detect($video, dbgCvs);
+
+        let raw;
+        let method = 'opencv';
+
+        // --- Try Gemini AI first ---
+        if (gemini.ready) {
+            method = 'gemini';
+            try {
+                // Show scanning indicator
+                if ($scanBtn) {
+                    $scanBtn.disabled = true;
+                    $scanBtn.textContent = '🤖 Scanning…';
+                }
+                raw = await gemini.detect($video);
+                console.log('[Scan] Gemini succeeded:', raw);
+            } catch (e) {
+                console.error('[Scan] Gemini failed:', e);
+                method = 'opencv (fallback)';
+                raw = null;
+                // Show error on debug panel
+                $debugInfo.textContent = 'Gemini error: ' + e.message +
+                    (gemini.lastResponse ? '\n\nRaw response:\n' + gemini.lastResponse : '');
+            } finally {
+                if ($scanBtn) {
+                    $scanBtn.disabled = false;
+                    $scanBtn.textContent = '📷 Scan Paper';
+                }
+            }
+        }
+
+        // --- OpenCV fallback ---
+        if (!raw) {
+            raw = shapes.detect($video, dbgCvs);
+        }
+
+        // --- Assign notes ---
         const assigned = notes.assignNotes(raw, oct);
+
+        // If Gemini found triangles, add them as special pads
+        if (raw.triangles && raw.triangles.length > 0) {
+            const TRI_SOUNDS = ['crash', 'hihat', 'tom1', 'tom2'];
+            raw.triangles
+                .sort((a, b) => a.centerX - b.centerX)
+                .forEach((t, i) => {
+                    assigned.push(Object.assign({}, t, {
+                        id:         't' + i,
+                        note:       TRI_SOUNDS[i % TRI_SOUNDS.length],
+                        instrument: 'drums',
+                        priority:   0,
+                    }));
+                });
+            notes.assignedShapes = assigned;
+        }
 
         const nKeys = assigned.filter(s => s.type === 'rectangle').length;
         const nPads = assigned.filter(s => s.type === 'circle').length;
+        const nTris = assigned.filter(s => s.type === 'triangle').length;
 
         $keyCount.textContent = nKeys;
         $padCount.textContent = nPads;
-        $shapeBadge.classList.toggle('hidden', nKeys + nPads === 0);
+        $shapeBadge.classList.toggle('hidden', nKeys + nPads + nTris === 0);
 
-        // Always update debug info (visible when debug panel open)
-        const strategyLog = shapes.lastLog || '(no strategies ran)';
+        // Debug info
+        const log = method.startsWith('gemini')
+            ? (gemini.lastLog || '(no log)')
+            : (shapes.lastLog || '(no strategies ran)');
         $debugInfo.textContent =
-            `Strategies: ${strategyLog}\n` +
-            `Result → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}\n` +
-            assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})`).join('\n');
+            `Method: ${method}\n` +
+            `${log}\n` +
+            `Detected → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}` +
+            `  Triangles: ${(raw.triangles || []).length}\n` +
+            `Assigned: ${assigned.length} shapes\n` +
+            assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})${s.points ? ' [' + s.points.length + ' pts]' : ''}`).join('\n');
 
-        if (nKeys + nPads === 0) {
-            console.warn('[Scan] No shapes found. Tips: use a thick dark marker on white paper, ensure good lighting, hold camera steady.');
+        if (nKeys + nPads + nTris === 0) {
+            console.warn('[Scan] No shapes found.');
         }
 
-        console.log('[Scan] paper detected:', !!shapes.paperContour);
+        console.log(`[Scan] ${method} | paper: ${method.startsWith('gemini') ? !!gemini.paperCorners : !!shapes.paperContour}`);
+
+        isScanning = false;
     }
 
     /* ==============================================================
@@ -385,12 +562,41 @@
        ============================================================== */
     $scanBtn.addEventListener('click', scanShapes);
 
+    // ---- Gemini API key ----
+    const $geminiKey    = document.getElementById('gemini-key');
+    const $geminiStatus = document.getElementById('gemini-status');
+
+    if ($geminiKey) {
+        // Restore saved key from localStorage
+        const savedKey = localStorage.getItem('gemini_api_key');
+        if (savedKey) {
+            $geminiKey.value = savedKey;
+            gemini.setApiKey(savedKey);
+            if ($geminiStatus) $geminiStatus.textContent = '🤖 AI ON';
+            if ($geminiStatus) $geminiStatus.classList.add('active');
+        }
+
+        $geminiKey.addEventListener('change', () => {
+            const key = $geminiKey.value.trim();
+            gemini.setApiKey(key);
+            if (key) {
+                localStorage.setItem('gemini_api_key', key);
+                if ($geminiStatus) { $geminiStatus.textContent = '🤖 AI ON'; $geminiStatus.classList.add('active'); }
+                console.log('[Gemini] API key set — AI shape detection enabled');
+            } else {
+                localStorage.removeItem('gemini_api_key');
+                if ($geminiStatus) { $geminiStatus.textContent = '🤖 OFF'; $geminiStatus.classList.remove('active'); }
+                console.log('[Gemini] API key cleared — using OpenCV fallback');
+            }
+        });
+    }
+
     $autoScanBtn.addEventListener('click', () => {
         autoScan = !autoScan;
         $autoScanBtn.textContent = autoScan ? '🔄 Auto: ON' : '🔄 Auto: OFF';
         $autoScanBtn.classList.toggle('active', autoScan);
         if (autoScan) {
-            autoScanTimer = setInterval(scanShapes, 2500);
+            autoScanTimer = setInterval(scanShapes, 8000);
         } else {
             clearInterval(autoScanTimer);
         }
@@ -404,8 +610,13 @@
 
     $octaveSlider.addEventListener('input', () => {
         $octaveVal.textContent = $octaveSlider.value;
-        // Re-assign notes at new octave if shapes already detected
-        if (notes.assignedShapes.length) scanShapes();
+        // Re-assign notes at new octave — reuse existing shapes, no new API call
+        if (notes.assignedShapes.length) {
+            const lastRaw = gemini.lockedShapes || shapes.lastResult || null;
+            if (lastRaw) {
+                notes.assignNotes(lastRaw, +$octaveSlider.value);
+            }
+        }
     });
 
     $debugBtn.addEventListener('click', () => {
