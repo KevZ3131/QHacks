@@ -11,58 +11,125 @@
     /* ==============================================================
        DOM handles
        ============================================================== */
-    const $splash        = document.getElementById('splash');
-    const $app           = document.getElementById('app');
-    const $startBtn      = document.getElementById('startBtn');
+    const $splash = document.getElementById('splash');
+    const $app = document.getElementById('app');
+    const $startBtn = document.getElementById('startBtn');
 
-    const $video         = document.getElementById('video');
-    const $overlay       = document.getElementById('overlay');
-    const $loadingOvr    = document.getElementById('loadingOverlay');
-    const $loadingTxt    = document.getElementById('loadingText');
+    const $video = document.getElementById('video');
+    const $overlay = document.getElementById('overlay');
+    const $loadingOvr = document.getElementById('loadingOverlay');
+    const $loadingTxt = document.getElementById('loadingText');
 
-    const $scanBtn       = document.getElementById('scanBtn');
-    const $autoScanBtn   = document.getElementById('autoScanBtn');
-    const $mirrorBtn     = document.getElementById('mirrorBtn');
+    const $scanBtn = document.getElementById('scanBtn');
+    const $autoScanBtn = document.getElementById('autoScanBtn');
+    const $mirrorBtn = document.getElementById('mirrorBtn');
 
-    const $octaveSlider  = document.getElementById('octaveSlider');
-    const $octaveVal     = document.getElementById('octaveVal');
-    const $sensSlider    = document.getElementById('sensitivitySlider');
+    const $octaveSlider = document.getElementById('octaveSlider');
+    const $octaveVal = document.getElementById('octaveVal');
+    const $sensSlider = document.getElementById('sensitivitySlider');
 
-    const $debugBtn      = document.getElementById('debugBtn');
-    const $debugPanel    = document.getElementById('debugPanel');
-    const $debugCanvas   = document.getElementById('debugCanvas');
-    const $debugInfo     = document.getElementById('debugInfo');
+    const $debugBtn = document.getElementById('debugBtn');
+    const $debugPanel = document.getElementById('debugPanel');
+    const $debugCanvas = document.getElementById('debugCanvas');
+    const $debugInfo = document.getElementById('debugInfo');
 
-    const $noteHUD       = document.getElementById('noteHUD');
-    const $shapeBadge    = document.getElementById('shapeBadge');
-    const $keyCount      = document.getElementById('keyCount');
-    const $padCount      = document.getElementById('padCount');
-    const $fpsEl         = document.getElementById('fps');
+    const $noteHUD = document.getElementById('noteHUD');
+    const $shapeBadge = document.getElementById('shapeBadge');
+    const $keyCount = document.getElementById('keyCount');
+    const $padCount = document.getElementById('padCount');
+    const $fpsEl = document.getElementById('fps');
 
-    const $camDot        = document.querySelector('#cameraStatus .dot');
-    const $handDot       = document.querySelector('#handStatus .dot');
-    const $cvDot         = document.querySelector('#cvStatus .dot');
+    const $camDot = document.querySelector('#cameraStatus .dot');
+    const $handDot = document.querySelector('#handStatus .dot');
+    const $cvDot = document.querySelector('#cvStatus .dot');
 
     /* ==============================================================
        Subsystems
        ============================================================== */
-    const audio  = new AudioEngine();
-    const hands  = new HandTracker();
+    /* ==============================================================
+       Subsystems
+       ============================================================== */
+    const audio = new AudioEngine();
+    const hands = new HandTracker();
     const shapes = new ShapeDetector();
-    const notes  = new NoteRecognizer();
+    const notes = new NoteRecognizer();
+
+    // Dynamic import to avoid module issues if not using type="module" in HTML yet
+    // But since we are using es6 modules for songs, we need to treat main as module or dynamic import
+    // The user's HTML has script src="js/main.js" without type="module".
+    // We should probably change index.html to type="module" or use dynamic import.
+    // Let's use dynamic import for the song player.
+    let songPlayer = null;
+    let SONGS = [];
+
+    import('./song-player.js').then(m => {
+        songPlayer = new m.SongPlayer(audio);
+        import('./songs.js').then(s => {
+            SONGS = s.SONGS;
+            initSongUI();
+        });
+    });
 
     /* ==============================================================
        State
        ============================================================== */
-    let running       = false;
-    let mirrored      = false;
-    let autoScan      = false;
+    let running = false;
+    let mirrored = false;
+    let autoScan = false;
     let autoScanTimer = null;
-    let showDebug     = false;
+    let showDebug = false;
 
-    let prevPressed   = new Set();      // shape ids currently held
-    let activeHUD     = new Map();      // id → timeout handle
-    let debounceMap   = new Map();      // shape id → timestamp of last release
+    let prevPressed = new Set();      // shape ids currently held
+    let activeHUD = new Map();      // id → timeout handle
+    let debounceMap = new Map();      // shape id → timestamp of last release
+
+    /* ==============================================================
+       Song UI Elements
+       ============================================================== */
+    const $songMenu = document.getElementById('songMenu');
+    const $songsBtn = document.getElementById('songsBtn');
+    const $closeSongsBtn = document.getElementById('closeSongsBtn');
+    const $songList = document.getElementById('songList');
+
+    function initSongUI() {
+        $songsBtn.addEventListener('click', () => {
+            $songMenu.classList.remove('hidden');
+            renderSongList();
+        });
+
+        $closeSongsBtn.addEventListener('click', () => {
+            $songMenu.classList.add('hidden');
+        });
+
+        // Close when clicking overlay
+        $songMenu.querySelector('.menu-overlay').addEventListener('click', () => {
+            $songMenu.classList.add('hidden');
+        });
+    }
+
+    function renderSongList() {
+        $songList.innerHTML = '';
+        SONGS.forEach(song => {
+            const div = document.createElement('div');
+            div.className = 'song-item';
+            div.textContent = song.title;
+            div.onclick = () => {
+                playSong(song.id);
+                $songMenu.classList.add('hidden');
+            };
+            $songList.appendChild(div);
+        });
+    }
+
+    function playSong(id) {
+        if (!notes.assignedShapes || notes.assignedShapes.length === 0) {
+            alert('Please scan your piano keys first so we know where to drop the notes!');
+            return;
+        }
+        // If the menu is open, maybe close it or let the user close it?
+        // The click handler closes it.
+        if (songPlayer) songPlayer.start(id);
+    }
 
     /* ----------------------------------------------------------
      * Tap detector — tracks fingertip vertical motion and fires
@@ -79,16 +146,16 @@
      * ---------------------------------------------------------- */
     const tapState = {};   // key → { yHist: number[], lastTapTime: number }
 
-    const TAP_HISTORY    = 4;      // frames of history to keep
+    const TAP_HISTORY = 4;      // frames of history to keep
     const TAP_VEL_THRESH = 0.008;  // min downward y-delta (normalised) over history window
-    const TAP_COOLDOWN   = 250;    // ms before same finger can tap again
-    const TAP_SUSTAIN    = 300;    // ms to hold a note after tap
+    const TAP_COOLDOWN = 250;    // ms before same finger can tap again
+    const TAP_SUSTAIN = 300;    // ms to hold a note after tap
 
     /**
      * Update tap tracking for a single fingertip.
      * @returns {boolean} true if a tap was just detected this frame
      */
-    function updateTap (tip) {
+    function updateTap(tip) {
         const key = tip.hand + ':' + tip.finger;
         const now = performance.now();
 
@@ -110,7 +177,7 @@
         // Compute downward velocity:  positive = moving down in screen coords
         const oldest = st.yHist[0];
         const newest = st.yHist[st.yHist.length - 1];
-        const vel    = newest - oldest;   // >0 means finger moved down
+        const vel = newest - oldest;   // >0 means finger moved down
 
         if (vel > TAP_VEL_THRESH) {
             st.lastTapTime = now;
@@ -122,7 +189,7 @@
     }
 
     /** Clean up tap state for fingers that disappeared. */
-    function pruneOldTaps (activeTips) {
+    function pruneOldTaps(activeTips) {
         const activeKeys = new Set(activeTips.map(t => t.hand + ':' + t.finger));
         for (const key of Object.keys(tapState)) {
             if (!activeKeys.has(key)) delete tapState[key];
@@ -143,14 +210,14 @@
         await boot();
     });
 
-    async function boot () {
+    async function boot() {
         try {
             /* ---- camera ---- */
             setLoading('Starting camera…');
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width:      { ideal: 1280 },
-                    height:     { ideal: 720 },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
                     facingMode: 'environment',
                 },
                 audio: false,
@@ -160,7 +227,7 @@
             $camDot.classList.add('ok');
 
             // Match canvas to video native resolution
-            $overlay.width  = $video.videoWidth;
+            $overlay.width = $video.videoWidth;
             $overlay.height = $video.videoHeight;
 
             /* ---- hand tracker ---- */
@@ -190,7 +257,7 @@
        ============================================================== */
     const octx = $overlay.getContext('2d');
 
-    function frame () {
+    function frame() {
         if (!running) { requestAnimationFrame(frame); return; }
 
         // Send frame to hand tracker (non-blocking)
@@ -208,12 +275,12 @@
     /* ==============================================================
        Interaction: finger → shape → sound
        ============================================================== */
-    function processInteraction () {
+    function processInteraction() {
         const tips = hands.getFingerTips();
-        const cw   = $overlay.width;
-        const ch   = $overlay.height;
-        const pad  = (+$sensSlider.value / 100) * 30;
-        const now  = performance.now();
+        const cw = $overlay.width;
+        const ch = $overlay.height;
+        const pad = (+$sensSlider.value / 100) * 30;
+        const now = performance.now();
 
         pruneOldTaps(tips);
 
@@ -223,12 +290,12 @@
             if (!tapped) continue;
 
             // Finger just tapped — see which shape it's inside
-            const px   = tip.x * cw;
-            const py   = tip.y * ch;
+            const px = tip.x * cw;
+            const py = tip.y * ch;
             const hits = notes.assignedShapes.filter(s => {
                 if (s.type === 'rectangle') {
                     return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
+                        py >= s.y - pad && py <= s.y + s.height + pad;
                 } else if (s.type === 'circle') {
                     return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
                 }
@@ -263,10 +330,15 @@
     /* ==============================================================
        Drawing overlay
        ============================================================== */
-    function draw () {
+    function draw() {
         const cw = $overlay.width;
         const ch = $overlay.height;
         octx.clearRect(0, 0, cw, ch);
+
+        // ---- draw falling notes (underground) ----
+        if (songPlayer) {
+            songPlayer.draw(octx, notes.assignedShapes, cw, ch);
+        }
 
         // ---- draw paper outline ----
         const paperPts = shapes.getPaperOutline();
@@ -278,7 +350,7 @@
             }
             octx.closePath();
             octx.strokeStyle = 'rgba(0,255,180,0.55)';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.setLineDash([8, 6]);
             octx.stroke();
             octx.setLineDash([]);
@@ -286,25 +358,25 @@
 
         // ---- draw shapes ----
         for (const s of notes.assignedShapes) {
-            const active   = prevPressed.has(s.id);
-            const editing  = editingShape && editingShape.id === s.id;
+            const active = prevPressed.has(s.id);
+            const editing = editingShape && editingShape.id === s.id;
 
             if (s.type === 'rectangle') {
-                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.lineWidth = (active || editing) ? 4 : 2;
                 octx.strokeStyle = active ? '#FF5722'
                     : editing ? '#FFD600'
-                    : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)'
+                        : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
+                octx.fillStyle = active ? 'rgba(255,87,34,0.30)'
                     : editing ? 'rgba(255,214,0,0.18)'
-                    : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
+                        : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
                 octx.fillRect(s.x, s.y, s.width, s.height);
                 octx.strokeRect(s.x, s.y, s.width, s.height);
             } else if (s.type === 'circle') {
                 octx.beginPath();
                 octx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
-                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.lineWidth = (active || editing) ? 4 : 2;
                 octx.strokeStyle = active ? '#FF5722' : editing ? '#FFD600' : 'rgba(76,175,80,0.8)';
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
+                octx.fillStyle = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
                 octx.fill();
                 octx.stroke();
             }
@@ -312,13 +384,13 @@
             // Note label
             const tx = s.type === 'circle' ? s.centerX : s.x + s.width / 2;
             const ty = s.type === 'circle' ? s.centerY : s.y + s.height / 2;
-            octx.font         = `bold ${active ? 22 : 17}px sans-serif`;
-            octx.textAlign    = 'center';
+            octx.font = `bold ${active ? 22 : 17}px sans-serif`;
+            octx.textAlign = 'center';
             octx.textBaseline = 'middle';
-            octx.strokeStyle  = 'rgba(0,0,0,0.7)';
-            octx.lineWidth    = 3;
+            octx.strokeStyle = 'rgba(0,0,0,0.7)';
+            octx.lineWidth = 3;
             octx.strokeText(s.note, tx, ty);
-            octx.fillStyle    = active ? '#FFF' : '#e0e0ff';
+            octx.fillStyle = active ? '#FFF' : '#e0e0ff';
             octx.fillText(s.note, tx, ty);
         }
 
@@ -329,10 +401,10 @@
             const y = t.y * ch;
             octx.beginPath();
             octx.arc(x, y, 9, 0, Math.PI * 2);
-            octx.fillStyle   = 'rgba(255,60,60,0.6)';
+            octx.fillStyle = 'rgba(255,60,60,0.6)';
             octx.fill();
             octx.strokeStyle = '#fff';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.stroke();
         }
 
@@ -350,13 +422,13 @@
     /* ==============================================================
        Shape scanning
        ============================================================== */
-    function scanShapes () {
-        const oct    = +$octaveSlider.value;
+    function scanShapes() {
+        const oct = +$octaveSlider.value;
         // Always pass debug canvas so we can inspect threshold if needed
         const dbgCvs = showDebug ? $debugCanvas : null;
 
         console.log('[Scan] scanning shapes… octave=' + oct);
-        const raw    = shapes.detect($video, dbgCvs);
+        const raw = shapes.detect($video, dbgCvs);
         const assigned = notes.assignNotes(raw, oct);
 
         const nKeys = assigned.filter(s => s.type === 'rectangle').length;
@@ -417,34 +489,34 @@
     /* ==============================================================
        Shape Editor — click a shape on the overlay to change its sound
        ============================================================== */
-    const $shapeEditor  = document.getElementById('shapeEditor');
-    const $editorTitle  = document.getElementById('editorTitle');
-    const $editorBody   = document.getElementById('editorBody');
-    const $editorClose  = document.getElementById('editorClose');
+    const $shapeEditor = document.getElementById('shapeEditor');
+    const $editorTitle = document.getElementById('editorTitle');
+    const $editorBody = document.getElementById('editorBody');
+    const $editorClose = document.getElementById('editorClose');
 
-    let editingShape    = null;  // reference into notes.assignedShapes
+    let editingShape = null;  // reference into notes.assignedShapes
 
     // All chromatic notes across one octave
-    const ALL_NOTES     = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    const DRUM_OPTIONS  = ['kick','snare','hihat','tom1','tom2','crash'];
+    const ALL_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const DRUM_OPTIONS = ['kick', 'snare', 'hihat', 'tom1', 'tom2', 'crash'];
 
     /** Convert overlay-canvas click to video-pixel coordinates. */
-    function overlayClickToVideoPx (e) {
+    function overlayClickToVideoPx(e) {
         const rect = $overlay.getBoundingClientRect();
-        const scaleX = $overlay.width  / rect.width;
+        const scaleX = $overlay.width / rect.width;
         const scaleY = $overlay.height / rect.height;
         return {
             x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top)  * scaleY,
+            y: (e.clientY - rect.top) * scaleY,
         };
     }
 
     /** Hit-test a click against assigned shapes (same priority rules as finger presses). */
-    function hitTestShapes (px, py) {
+    function hitTestShapes(px, py) {
         const hits = notes.assignedShapes.filter(s => {
             if (s.type === 'rectangle') {
                 return px >= s.x && px <= s.x + s.width &&
-                       py >= s.y && py <= s.y + s.height;
+                    py >= s.y && py <= s.y + s.height;
             } else if (s.type === 'circle') {
                 return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius;
             }
@@ -459,25 +531,25 @@
     }
 
     /** Open the editor popup anchored near the click position. */
-    function openEditor (shape, clickEvt) {
+    function openEditor(shape, clickEvt) {
         editingShape = shape;
         $shapeEditor.classList.remove('hidden');
 
         // Position: near the click, but keep inside the camera container
         const container = document.getElementById('cameraContainer');
-        const cRect     = container.getBoundingClientRect();
+        const cRect = container.getBoundingClientRect();
         let left = clickEvt.clientX - cRect.left + 12;
-        let top  = clickEvt.clientY - cRect.top  + 12;
+        let top = clickEvt.clientY - cRect.top + 12;
 
         // Clamp so popup doesn't overflow
         const edW = 260, edH = 240;
-        if (left + edW > cRect.width)  left = cRect.width  - edW - 8;
-        if (top  + edH > cRect.height) top  = cRect.height - edH - 8;
+        if (left + edW > cRect.width) left = cRect.width - edW - 8;
+        if (top + edH > cRect.height) top = cRect.height - edH - 8;
         if (left < 4) left = 4;
-        if (top  < 4) top  = 4;
+        if (top < 4) top = 4;
 
         $shapeEditor.style.left = left + 'px';
-        $shapeEditor.style.top  = top  + 'px';
+        $shapeEditor.style.top = top + 'px';
 
         // Build content based on instrument type
         if (shape.instrument === 'piano') {
@@ -487,7 +559,7 @@
         }
     }
 
-    function closeEditor () {
+    function closeEditor() {
         $shapeEditor.classList.add('hidden');
         editingShape = null;
     }
@@ -502,10 +574,10 @@
     });
 
     /** Build a piano-note picker (chromatic, with octave selector). */
-    function buildPianoEditor (shape) {
+    function buildPianoEditor(shape) {
         // Parse current note & octave
         const curBase = shape.note.replace(/\d+$/, '');
-        const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+        const curOct = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
 
         $editorTitle.textContent = '🎹 Piano Key — ' + shape.id;
 
@@ -524,7 +596,7 @@
         html += '<div class="editor-section-label">Note</div>';
         html += '<div class="editor-grid">';
         for (const n of ALL_NOTES) {
-            const sel   = n === curBase ? ' selected' : '';
+            const sel = n === curBase ? ' selected' : '';
             const sharp = n.includes('#') ? ' sharp' : '';
             html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
         }
@@ -556,7 +628,7 @@
     }
 
     /** Build a drum-type picker. */
-    function buildDrumEditor (shape) {
+    function buildDrumEditor(shape) {
         $editorTitle.textContent = '🥁 Drum Pad — ' + shape.id;
 
         let html = '<div class="editor-section-label">Drum Sound</div>';
@@ -597,7 +669,7 @@
     /* ==============================================================
        HUD (floating note names on play)
        ============================================================== */
-    function showNoteHUD (shape) {
+    function showNoteHUD(shape) {
         // Remove old bubble for this id if it exists
         if (activeHUD.has(shape.id)) {
             clearTimeout(activeHUD.get(shape.id).timer);
@@ -614,11 +686,11 @@
     /* ==============================================================
        Helpers
        ============================================================== */
-    function setLoading (msg) {
+    function setLoading(msg) {
         $loadingTxt.textContent = msg;
     }
 
-    function waitForOpenCV () {
+    function waitForOpenCV() {
         return new Promise((resolve) => {
             console.log('[OpenCV] waiting for cv to load…');
 
@@ -636,7 +708,7 @@
                 resolve();
             }, 45000);
 
-            function onReady () {
+            function onReady() {
                 clearInterval(poll);
                 clearTimeout(timeout);
                 console.log('[OpenCV] runtime ready — cv.Mat exists:', typeof cv.Mat === 'function');
@@ -680,7 +752,7 @@
         });
     }
 
-    function updateFPS () {
+    function updateFPS() {
         frameCount++;
         const now = performance.now();
         if (now - lastFpsTime >= 1000) {
