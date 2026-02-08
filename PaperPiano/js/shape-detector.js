@@ -13,23 +13,23 @@
 'use strict';
 
 class ShapeDetector {
-    constructor () {
+    constructor() {
         /** Cached detected shapes (array of shape objects). */
-        this.shapes         = [];
-        this.ready          = false;
+        this.shapes = [];
+        this.ready = false;
         /** Last debug log string */
-        this.lastLog        = '';
+        this.lastLog = '';
         /** Cached paper contour (in processing-canvas coords) for overlay drawing. */
-        this.paperContour   = null;
+        this.paperContour = null;
         /** Intermediate canvas used to feed frames to OpenCV */
-        this._canvas        = null;
-        this._ctx           = null;
+        this._canvas = null;
+        this._ctx = null;
         /** Width / height of the processing canvas (can be down-scaled). */
-        this._w             = 0;
-        this._h             = 0;
+        this._w = 0;
+        this._h = 0;
         /** Scale factors from processing canvas → original video size. */
-        this._sx            = 1;
-        this._sy            = 1;
+        this._sx = 1;
+        this._sy = 1;
     }
 
     /* ---------- lifecycle ---------- */
@@ -38,22 +38,27 @@ class ShapeDetector {
      * @param {number} videoW – native video width
      * @param {number} videoH – native video height
      */
-    init (videoW, videoH) {
+    init(videoW, videoH) {
         // Down-scale for speed (process at max 640 wide)
         const maxW = 640;
         const scale = videoW > maxW ? maxW / videoW : 1;
-        this._w  = Math.round(videoW * scale);
-        this._h  = Math.round(videoH * scale);
+        this._w = Math.round(videoW * scale);
+        this._h = Math.round(videoH * scale);
         this._sx = videoW / this._w;
         this._sy = videoH / this._h;
 
-        this._canvas        = document.createElement('canvas');
-        this._canvas.width  = this._w;
+        // Tweakable params
+        this.PAPER_THRESH = 120;  // Lowered from 160 to accept dimmer lighting
+        this.ADAPT_BLOCK = 31;   // Increased from 21 to handle thicker marker lines
+        this.ADAPT_C = 5;
+
+        this._canvas = document.createElement('canvas');
+        this._canvas.width = this._w;
         this._canvas.height = this._h;
-        this._ctx           = this._canvas.getContext('2d', { willReadFrequently: true });
-        this.ready          = true;
+        this._ctx = this._canvas.getContext('2d', { willReadFrequently: true });
+        this.ready = true;
         console.log('[ShapeDetector] init', this._w, 'x', this._h,
-                    'scale', this._sx.toFixed(2), this._sy.toFixed(2));
+            'scale', this._sx.toFixed(2), this._sy.toFixed(2));
     }
 
     /**
@@ -62,7 +67,7 @@ class ShapeDetector {
      * @param {HTMLCanvasElement} [debugCanvas] – optional canvas for debug vis
      * @returns {{ rectangles: object[], circles: object[] }}
      */
-    detect (video, debugCanvas) {
+    detect(video, debugCanvas) {
         if (!this.ready) {
             console.warn('[ShapeDetector] not ready (.init not called)');
             return { rectangles: [], circles: [] };
@@ -92,7 +97,7 @@ class ShapeDetector {
 
         this.shapes = [...result.rectangles, ...result.circles];
         console.log('[ShapeDetector] found', result.rectangles.length,
-                    'rects,', result.circles.length, 'circles');
+            'rects,', result.circles.length, 'circles');
         return result;
     }
 
@@ -101,7 +106,7 @@ class ShapeDetector {
        detect shapes inside it.
        ================================================================ */
 
-    _detectWithPaperIsolation (src, debugCanvas) {
+    _detectWithPaperIsolation(src, debugCanvas) {
         const gray = new cv.Mat();
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
@@ -141,7 +146,8 @@ class ShapeDetector {
         try {
             const thA = new cv.Mat();
             cv.adaptiveThreshold(blurred, thA, 255,
-                cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+                cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, this.ADAPT_BLOCK, this.ADAPT_C);
+            cv.bitwise_and(thA, mask, thA);           // zero out everything outside paper
             cv.bitwise_and(thA, mask, thA);           // zero out everything outside paper
             const resA = this._extractShapes(thA, 'Adaptive', paperCnt, mask);
             log += `A(adapt): ${resA.rectangles.length}r ${resA.circles.length}c  `;
@@ -152,7 +158,7 @@ class ShapeDetector {
         try {
             const thB = new cv.Mat();
             cv.threshold(blurred, thB, 0, 255,
-                         cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+                cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
             cv.bitwise_and(thB, mask, thB);
             const resB = this._extractShapes(thB, 'Otsu', paperCnt, mask);
             log += `B(otsu): ${resB.rectangles.length}r ${resB.circles.length}c  `;
@@ -180,11 +186,11 @@ class ShapeDetector {
         });
 
         const best = strategies[0] ||
-                     { result: { rectangles: [], circles: [] }, thresh: null };
+            { result: { rectangles: [], circles: [] }, thresh: null };
 
         // Debug canvas
         if (debugCanvas && best.thresh) {
-            debugCanvas.width  = this._w;
+            debugCanvas.width = this._w;
             debugCanvas.height = this._h;
             cv.imshow(debugCanvas, best.thresh);
         }
@@ -205,12 +211,12 @@ class ShapeDetector {
        quadrilateral in the scene.
        ================================================================ */
 
-    _findPaper (gray) {
+    _findPaper(gray) {
         const imgArea = this._w * this._h;
 
         // 1. Threshold: paper is bright → keep bright pixels
         const bright = new cv.Mat();
-        cv.threshold(gray, bright, 160, 255, cv.THRESH_BINARY);
+        cv.threshold(gray, bright, this.PAPER_THRESH, 255, cv.THRESH_BINARY);
 
         // 2. Close small gaps (text, lines on the paper)
         const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15));
@@ -218,33 +224,33 @@ class ShapeDetector {
         k.delete();
 
         // 3. Find contours
-        const contours  = new cv.MatVector();
+        const contours = new cv.MatVector();
         const hierarchy = new cv.Mat();
         cv.findContours(bright, contours, hierarchy,
-                        cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        let bestCnt  = null;
+        let bestCnt = null;
         let bestArea = 0;
 
         for (let i = 0; i < contours.size(); i++) {
-            const cnt  = contours.get(i);
+            const cnt = contours.get(i);
             const area = cv.contourArea(cnt);
 
             // Paper must be at least 5% of the image and no more than 95%
             if (area < imgArea * 0.05 || area > imgArea * 0.95) continue;
 
-            const peri   = cv.arcLength(cnt, true);
+            const peri = cv.arcLength(cnt, true);
             const approx = new cv.Mat();
             cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
 
             const verts = approx.rows;
-            const rect  = cv.boundingRect(cnt);
+            const rect = cv.boundingRect(cnt);
             const extent = area / (rect.width * rect.height);
 
             // Accept quadrilateral-ish shapes (4-8 verts) with decent fill
             if (verts >= 4 && verts <= 8 && extent > 0.6 && area > bestArea) {
                 bestArea = area;
-                bestCnt  = cnt.clone();   // clone — original will be freed
+                bestCnt = cnt.clone();   // clone — original will be freed
             }
             approx.delete();
         }
@@ -256,8 +262,8 @@ class ShapeDetector {
 
         if (bestCnt) {
             console.log('[ShapeDetector] paper found, area',
-                        bestArea, '/', imgArea,
-                        '(' + (bestArea / imgArea * 100).toFixed(1) + '%)');
+                bestArea, '/', imgArea,
+                '(' + (bestArea / imgArea * 100).toFixed(1) + '%)');
         } else {
             console.log('[ShapeDetector] no paper detected');
         }
@@ -281,12 +287,12 @@ class ShapeDetector {
      * @param {cv.Mat|null} paperCnt – paper contour (for center-in-paper test)
      * @param {cv.Mat|null} paperMask – 255 inside paper, 0 outside
      */
-    _extractShapes (binaryImg, label, paperCnt, paperMask) {
+    _extractShapes(binaryImg, label, paperCnt, paperMask) {
 
         // 1. Dilate pen strokes so thin dividing lines become solid barriers.
         //    This also bridges small gaps / breaks in hand-drawn lines.
         const dilated = new cv.Mat();
-        const dilK    = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+        const dilK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
         cv.dilate(binaryImg, dilated, dilK);
 
         // 2. Invert: interiors → 255, strokes → 0, outside paper → 255
@@ -297,7 +303,7 @@ class ShapeDetector {
         //    Erode the mask a few px so the paper border doesn't create a
         //    spurious ribbon of white around the edges.
         if (paperMask) {
-            const shrunk  = new cv.Mat();
+            const shrunk = new cv.Mat();
             const shrunkK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
             cv.erode(paperMask, shrunk, shrunkK);
             cv.bitwise_and(inverted, shrunk, inverted);
@@ -306,17 +312,17 @@ class ShapeDetector {
         }
 
         // 4. Find contours of the interior regions
-        const contours  = new cv.MatVector();
+        const contours = new cv.MatVector();
         const hierarchy = new cv.Mat();
         cv.findContours(inverted, contours, hierarchy,
-                        cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        const refArea    = paperCnt ? cv.contourArea(paperCnt) : (this._w * this._h);
+        const refArea = paperCnt ? cv.contourArea(paperCnt) : (this._w * this._h);
         const rectangles = [];
-        const circles    = [];
+        const circles = [];
 
         for (let i = 0; i < contours.size(); i++) {
-            const cnt  = contours.get(i);
+            const cnt = contours.get(i);
             const area = cv.contourArea(cnt);
 
             // Size filter: 0.3 % – 45 % of paper
@@ -327,7 +333,7 @@ class ShapeDetector {
 
             // Centre-in-paper check
             if (paperCnt) {
-                const r  = cv.boundingRect(cnt);
+                const r = cv.boundingRect(cnt);
                 const cx = r.x + r.width / 2;
                 const cy = r.y + r.height / 2;
                 if (cv.pointPolygonTest(paperCnt, new cv.Point(cx, cy), false) < 0)
@@ -337,28 +343,37 @@ class ShapeDetector {
             const approx = new cv.Mat();
             cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-            const verts       = approx.rows;
+            const verts = approx.rows;
             const circularity = (4 * Math.PI * area) / (peri * peri);
-            const rect        = cv.boundingRect(cnt);
-            const extent      = area / (rect.width * rect.height);
-            const aspect      = rect.width / rect.height;
+            const rect = cv.boundingRect(cnt);
+            const extent = area / (rect.width * rect.height);
+            const aspect = rect.width / rect.height;
+
+            // Extract polygon points
+            const poly = [];
+            for (let j = 0; j < verts; j++) {
+                poly.push({
+                    x: approx.data32S[j * 2],
+                    y: approx.data32S[j * 2 + 1]
+                });
+            }
             approx.delete();
 
             console.log(`[Shape ${label}#${i}] v=${verts} circ=${circularity.toFixed(3)} ext=${extent.toFixed(3)} asp=${aspect.toFixed(2)} area=${area.toFixed(0)}`);
 
             // Classify by vertex count (primary) + circularity (secondary)
             if (verts >= 4 && verts <= 5) {
-                if (extent > 0.30) rectangles.push(this._scaleRect(rect, area));
+                if (extent > 0.30) rectangles.push(this._scaleRect(rect, area, poly));
             } else if (verts === 6 || verts === 7) {
                 if (circularity >= 0.75 && aspect >= 0.65 && aspect <= 1.55)
                     circles.push(this._scaleCircle(rect, area));
                 else if (extent > 0.30)
-                    rectangles.push(this._scaleRect(rect, area));
+                    rectangles.push(this._scaleRect(rect, area, poly));
             } else if (verts >= 8) {
                 if (circularity >= 0.55 && aspect >= 0.45 && aspect <= 2.2)
                     circles.push(this._scaleCircle(rect, area));
                 else if (extent > 0.30)
-                    rectangles.push(this._scaleRect(rect, area));
+                    rectangles.push(this._scaleRect(rect, area, poly));
             }
         }
 
@@ -373,43 +388,44 @@ class ShapeDetector {
     /* ---------- coordinate helpers ---------- */
 
     /** Return the paper contour scaled to the full video resolution (for overlay). */
-    getPaperOutline () {
+    getPaperOutline() {
         if (!this.paperContour) return null;
-        const cnt  = this.paperContour;
-        const pts  = [];
+        const cnt = this.paperContour;
+        const pts = [];
         for (let i = 0; i < cnt.data32S.length; i += 2) {
             pts.push({
-                x: cnt.data32S[i]     * this._sx,
+                x: cnt.data32S[i] * this._sx,
                 y: cnt.data32S[i + 1] * this._sy,
             });
         }
         return pts;
     }
 
-    _scaleRect (r, area) {
+    _scaleRect(r, area, poly) {
         return {
-            type:    'rectangle',
-            x:       r.x * this._sx,
-            y:       r.y * this._sy,
-            width:   r.width  * this._sx,
-            height:  r.height * this._sy,
-            centerX: (r.x + r.width / 2)  * this._sx,
+            type: 'rectangle',
+            x: r.x * this._sx,
+            y: r.y * this._sy,
+            width: r.width * this._sx,
+            height: r.height * this._sy,
+            centerX: (r.x + r.width / 2) * this._sx,
             centerY: (r.y + r.height / 2) * this._sy,
-            area:    area * this._sx * this._sy,
+            area: area * this._sx * this._sy,
+            poly: poly ? poly.map(p => ({ x: p.x * this._sx, y: p.y * this._sy })) : null
         };
     }
 
-    _scaleCircle (r, area) {
+    _scaleCircle(r, area) {
         return {
-            type:    'circle',
-            centerX: (r.x + r.width / 2)  * this._sx,
+            type: 'circle',
+            centerX: (r.x + r.width / 2) * this._sx,
             centerY: (r.y + r.height / 2) * this._sy,
-            radius:  Math.max(r.width, r.height) / 2 * Math.max(this._sx, this._sy),
-            x:       r.x * this._sx,
-            y:       r.y * this._sy,
-            width:   r.width  * this._sx,
-            height:  r.height * this._sy,
-            area:    area * this._sx * this._sy,
+            radius: Math.max(r.width, r.height) / 2 * Math.max(this._sx, this._sy),
+            x: r.x * this._sx,
+            y: r.y * this._sy,
+            width: r.width * this._sx,
+            height: r.height * this._sy,
+            area: area * this._sx * this._sy,
         };
     }
 }

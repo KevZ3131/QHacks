@@ -369,8 +369,20 @@
                 octx.fillStyle = active ? 'rgba(255,87,34,0.30)'
                     : editing ? 'rgba(255,214,0,0.18)'
                         : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
-                octx.fillRect(s.x, s.y, s.width, s.height);
-                octx.strokeRect(s.x, s.y, s.width, s.height);
+
+                if (s.poly && s.poly.length > 0) {
+                    octx.beginPath();
+                    octx.moveTo(s.poly[0].x, s.poly[0].y);
+                    for (let i = 1; i < s.poly.length; i++) {
+                        octx.lineTo(s.poly[i].x, s.poly[i].y);
+                    }
+                    octx.closePath();
+                    octx.fill();
+                    octx.stroke();
+                } else {
+                    octx.fillRect(s.x, s.y, s.width, s.height);
+                    octx.strokeRect(s.x, s.y, s.width, s.height);
+                }
             } else if (s.type === 'circle') {
                 octx.beginPath();
                 octx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
