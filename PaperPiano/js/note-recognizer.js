@@ -1,214 +1,202 @@
-/**
- * NoteRecognizer - OCR-based musical-note recognition using Tesseract.js.
- *
- * Two modes:
- *   1. recognize(canvas) — single-region OCR (legacy, for cropped shapes)
- *   2. detectAll(canvas)  — full-frame OCR that returns ALL detected note
- *      labels with their bounding boxes.  This is the text-first seed source
- *      for the new shape-detection pipeline.
- *
- * Falls back to sequential default notes when OCR is unavailable or uncertain.
- */
+/* =========================================================
+   NoteRecognizer — maps detected shapes → musical notes
+   =========================================================
+   • Rectangles → piano keys (white or black)
+   • Circles    → drum pads
+   Handles overlapping shapes (black keys sit on top of
+   white keys) and resolves finger presses to the most
+   specific (highest-priority, smallest) shape.
+   ========================================================= */
+'use strict';
 
-const VALID_NOTES = [
-    'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B',
-    'Db', 'Eb', 'Gb', 'Ab', 'Bb'
-];
+class NoteRecognizer {
+    constructor () {
+        this.WHITE_NOTES = ['C','D','E','F','G','A','B'];
+        this.BLACK_NOTES = ['C#','D#','F#','G#','A#'];
+        this.DRUM_NAMES  = ['kick','snare','hihat','tom1','tom2','crash'];
 
-const DEFAULT_SCALE = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-
-export class NoteRecognizer {
-    constructor() {
-        this.worker = null;
-        this.ready = false;
+        /** Assigned shapes with note labels.  Set by assignNotes(). */
+        this.assignedShapes = [];
     }
 
-    async init(onProgress) {
-        try {
-            if (onProgress) onProgress('Loading OCR engine…');
-
-            // Wait for the Tesseract.js <script async> tag to load (max 15s)
-            await new Promise((resolve, reject) => {
-                if (typeof Tesseract !== 'undefined') { resolve(); return; }
-                const t = setTimeout(() => reject(new Error('Tesseract script load timeout')), 15000);
-                const poll = () => {
-                    if (typeof Tesseract !== 'undefined') { clearTimeout(t); resolve(); return; }
-                    setTimeout(poll, 200);
-                };
-                poll();
-            });
-
-            // Create the worker with a 20-second timeout so it doesn't hang forever
-            const workerPromise = Tesseract.createWorker('eng', 1, {
-                logger: m => {
-                    if (m.status && onProgress) onProgress(`OCR: ${m.status}`);
-                }
-            });
-
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Tesseract worker creation timed out (20 s)')), 20000)
-            );
-
-            this.worker = await Promise.race([workerPromise, timeoutPromise]);
-
-            // Default to single-character mode; detectAll overrides per-call
-            await this.worker.setParameters({
-                tessedit_char_whitelist: 'ABCDEFGabcdefg#b',
-                tessedit_pageseg_mode: '8'   // PSM.SINGLE_WORD
-            });
-
-            this.ready = true;
-            if (onProgress) onProgress('OCR ready ✓');
-        } catch (err) {
-            console.warn('NoteRecognizer init failed (OCR optional):', err);
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Full-frame OCR — returns all detected note labels with positions
-    // ═══════════════════════════════════════════════════════════════════════════
+    /* ---------- note assignment ---------- */
 
     /**
-     * Run OCR on the full canvas and return every recognized note label,
-     * along with its bounding box and centroid.
+     * Takes raw rectangles & circles from ShapeDetector and
+     * assigns musical notes / drum sounds to each one.
+     * @param {{ rectangles: object[], circles: object[] }} shapes
+     * @param {number} [octave=4]
+     * @returns {object[]} – assigned shapes
+     */
+    assignNotes (shapes, octave = 4) {
+        const { rectangles, circles } = shapes;
+        const { whites, blacks } = this._classifyKeys(rectangles);
+
+        // Sort left → right
+        whites.sort((a, b) => a.centerX - b.centerX);
+        blacks.sort((a, b) => a.centerX - b.centerX);
+        const sortedCircles = [...circles].sort((a, b) => a.centerX - b.centerX);
+
+        const assigned = [];
+
+        // ---- white piano keys ----
+        whites.forEach((k, i) => {
+            const ni  = i % this.WHITE_NOTES.length;
+            const oct = octave + Math.floor(i / this.WHITE_NOTES.length);
+            assigned.push(Object.assign({}, k, {
+                id:         'w' + i,
+                note:       this.WHITE_NOTES[ni] + oct,
+                instrument: 'piano',
+                isBlack:    false,
+                priority:   0,
+            }));
+        });
+
+        // ---- black piano keys ----
+        blacks.forEach((k, i) => {
+            // Try to derive note from neighbouring white keys
+            const note = this._deriveBlackNote(k, assigned.filter(s => !s.isBlack), i, octave);
+            assigned.push(Object.assign({}, k, {
+                id:         'b' + i,
+                note:       note,
+                instrument: 'piano',
+                isBlack:    true,
+                priority:   1,     // higher = always chosen over white key
+            }));
+        });
+
+        // ---- drum pads ----
+        sortedCircles.forEach((c, i) => {
+            assigned.push(Object.assign({}, c, {
+                id:         'd' + i,
+                note:       this.DRUM_NAMES[i % this.DRUM_NAMES.length],
+                instrument: 'drums',
+                priority:   0,
+            }));
+        });
+
+        this.assignedShapes = assigned;
+        return assigned;
+    }
+
+    /* ---------- key classification ---------- */
+
+    /**
+     * Separate rectangles into white and black keys.
      *
-     * @param {HTMLCanvasElement} canvas — binarised / preprocessed frame
-     * @returns {Promise<Array<{note, bbox, center}>>}
-     *   note:   validated note string (e.g. 'C#')
-     *   bbox:   {x, y, width, height} in canvas coordinates
-     *   center: {x, y} centroid of the text bounding box
+     * Heuristic – in a hand-drawn piano:
+     *   • White keys are taller / larger rectangles
+     *   • Black keys are smaller and overlap at least one white key
+     *
+     * Falls back to area-based split when overlap check is insufficient.
      */
-    async detectAll(canvas) {
-        if (!this.ready || !this.worker) return [];
+    _classifyKeys (rects) {
+        if (rects.length <= 1) return { whites: rects, blacks: [] };
 
-        try {
-            // Switch to sparse-text mode for full-page scanning
-            await this.worker.setParameters({
-                tessedit_char_whitelist: 'ABCDEFGabcdefg#b',
-                tessedit_pageseg_mode: '11'   // PSM.SPARSE_TEXT — find as much text as possible
-            });
+        // Sort descending by area
+        const sorted = [...rects].sort((a, b) => b.area - a.area);
+        const maxArea = sorted[0].area;
 
-            const { data } = await this.worker.recognize(canvas);
+        // Threshold: anything < 65 % of the largest rectangle is a black key candidate
+        const threshold = maxArea * 0.65;
 
-            // Restore single-word mode for future per-region calls
-            await this.worker.setParameters({
-                tessedit_pageseg_mode: '8'
-            });
+        const whites = [];
+        const blacks = [];
 
-            const results = [];
-
-            if (!data?.words?.length) return results;
-
-            for (const word of data.words) {
-                const note = this.parse(word.text);
-                if (!note) continue;
-
-                const bb = word.bbox;   // { x0, y0, x1, y1 }
-                const bbox = {
-                    x:      bb.x0,
-                    y:      bb.y0,
-                    width:  bb.x1 - bb.x0,
-                    height: bb.y1 - bb.y0
-                };
-
-                // Reject implausibly large "words" (> 20% of frame)
-                if (bbox.width * bbox.height > canvas.width * canvas.height * 0.20) continue;
-                // Reject tiny noise
-                if (bbox.width < 6 || bbox.height < 6) continue;
-
-                results.push({
-                    note,
-                    bbox,
-                    center: {
-                        x: bbox.x + bbox.width  / 2,
-                        y: bbox.y + bbox.height / 2
-                    },
-                    confidence: word.confidence ?? 0
-                });
+        for (const r of sorted) {
+            if (r.area < threshold) {
+                blacks.push(r);
+            } else {
+                whites.push(r);
             }
-
-            // Deduplicate notes that are very close together (OCR double-detections)
-            return this._deduplicateLabels(results);
-        } catch (err) {
-            console.warn('detectAll OCR error:', err);
-            return [];
         }
+
+        // If all ended up in one bucket, fall back to height-based split
+        if (blacks.length === 0 && rects.length > 2) {
+            const heights = rects.map(r => r.height).sort((a, b) => a - b);
+            const medH    = heights[Math.floor(heights.length / 2)];
+            return {
+                whites: rects.filter(r => r.height >= medH * 0.75),
+                blacks: rects.filter(r => r.height <  medH * 0.75),
+            };
+        }
+
+        return { whites, blacks };
     }
 
-    /** Merge labels whose centres are within mergeDist pixels. */
-    _deduplicateLabels(labels, mergeDist = 30) {
-        const kept = [];
-        for (const lbl of labels) {
-            let dominated = false;
-            for (const k of kept) {
-                const dx = lbl.center.x - k.center.x;
-                const dy = lbl.center.y - k.center.y;
-                if (Math.sqrt(dx * dx + dy * dy) < mergeDist) {
-                    // Keep the one with higher confidence
-                    if (lbl.confidence > k.confidence) {
-                        kept[kept.indexOf(k)] = lbl;
-                    }
-                    dominated = true;
-                    break;
+    /**
+     * Derive a black key's note from the white key to its left.
+     * If there is a white key whose center is left of this black key,
+     * we use that white key's note + '#'.
+     */
+    _deriveBlackNote (blackKey, whiteKeys, fallbackIdx, octave) {
+        let leftWhite = null;
+        for (const w of whiteKeys) {
+            if (w.centerX < blackKey.centerX) {
+                if (!leftWhite || w.centerX > leftWhite.centerX) leftWhite = w;
+            }
+        }
+        if (leftWhite) {
+            const base = leftWhite.note.replace(/\d+$/, '');
+            const oct  = leftWhite.note.match(/\d+$/)?.[0] ?? octave;
+            // Only add '#' if the note isn't already a sharp
+            if (!base.includes('#')) return base + '#' + oct;
+        }
+        // Fallback: cycle through standard black notes
+        const ni  = fallbackIdx % this.BLACK_NOTES.length;
+        const oct = octave + Math.floor(fallbackIdx / this.BLACK_NOTES.length);
+        return this.BLACK_NOTES[ni] + oct;
+    }
+
+    /* ---------- press detection ---------- */
+
+    /**
+     * Given an array of fingertip positions (normalised 0-1) and
+     * the overlay canvas dimensions, return which shapes are pressed.
+     *
+     * Overlap resolution: black keys win over white keys;
+     * smaller shapes win over larger shapes at the same priority.
+     *
+     * @param {Array<{x:number,y:number}>} tips – normalised coords
+     * @param {number} cw – canvas (video) width in px
+     * @param {number} ch – canvas (video) height in px
+     * @param {number} [padPx=0] – extra hit-area padding in px
+     * @returns {Array<{shape: object, tipX: number, tipY: number}>}
+     */
+    getPresses (tips, cw, ch, padPx = 0) {
+        const pressed = [];
+
+        for (const tip of tips) {
+            const px = tip.x * cw;
+            const py = tip.y * ch;
+
+            // Collect every shape that contains this point
+            const hits = this.assignedShapes.filter(s => {
+                const pad = padPx;
+                if (s.type === 'rectangle') {
+                    return px >= s.x - pad && px <= s.x + s.width + pad &&
+                           py >= s.y - pad && py <= s.y + s.height + pad;
+                } else if (s.type === 'circle') {
+                    const dx = px - s.centerX;
+                    const dy = py - s.centerY;
+                    return Math.hypot(dx, dy) <= s.radius + pad;
                 }
-            }
-            if (!dominated) kept.push(lbl);
-        }
-        return kept;
-    }
+                return false;
+            });
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Single-region OCR (legacy / fallback)
-    // ═══════════════════════════════════════════════════════════════════════════
+            if (hits.length === 0) continue;
 
-    /**
-     * Attempt to recognize a note name from a cropped canvas region.
-     * @param {HTMLCanvasElement} canvas - pre-processed crop
-     * @returns {string|null} recognized note or null
-     */
-    async recognize(canvas) {
-        if (!this.ready || !this.worker) return null;
-        try {
-            const { data } = await this.worker.recognize(canvas);
-            return this.parse(data.text);
-        } catch {
-            return null;
-        }
-    }
+            // Sort: highest priority first, then smallest area
+            hits.sort((a, b) => {
+                if (a.priority !== b.priority) return b.priority - a.priority;
+                return a.area - b.area;
+            });
 
-    /**
-     * Parse raw OCR text into a valid musical note name.
-     */
-    parse(text) {
-        if (!text) return null;
-
-        let cleaned = text.trim().toUpperCase().replace(/[^A-G#B]/g, '');
-        if (!cleaned) return null;
-
-        const letter = cleaned.charAt(0);
-        if (!'ABCDEFG'.includes(letter)) return null;
-
-        let note = letter;
-        if (cleaned.length > 1) {
-            const mod = cleaned.charAt(1);
-            if (mod === '#') note += '#';
-            // 'b' for flat — e.g. 'Bb', 'Eb'
-            if (mod === 'B' && letter !== 'B' && cleaned.length === 2) {
-                note += 'b';
-            }
+            pressed.push({ shape: hits[0], tipX: px, tipY: py });
         }
 
-        return VALID_NOTES.includes(note) ? note : (VALID_NOTES.includes(letter) ? letter : null);
-    }
-
-    /**
-     * Return a sensible default note for a given shape index.
-     */
-    getDefaultNote(index) {
-        return DEFAULT_SCALE[index % DEFAULT_SCALE.length];
-    }
-
-    destroy() {
-        this.worker?.terminate();
+        return pressed;
     }
 }
+
+window.NoteRecognizer = NoteRecognizer;

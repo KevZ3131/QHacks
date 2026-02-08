@@ -1,42 +1,42 @@
-# 🎹 Paper Piano
+# Paper Piano — Draw & Play
 
-**Draw instruments on paper and play them with your hands — in real time, in a browser.**
-
-Paper Piano uses your webcam to detect shapes drawn on paper, reads the note names written inside them, and plays musical notes when you touch the shapes with your fingers. It turns any piece of paper into a playable instrument.
+> Draw instruments on paper, point your camera, and play them with your fingers in real time.
 
 ---
 
 ## High-Level Architecture
 
 ```
-┌────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  Camera    │────▶│  Shape Detection  │────▶│ Note Labels │
-│  (WebRTC)  │     │  (OpenCV.js)      │     │ (Tesseract) │
-└────────────┘     └──────────────────┘     └─────────────┘
-       │                                           │
-       ▼                                           ▼
-┌────────────────┐     ┌──────────────┐     ┌─────────────┐
-│  Hand Tracking  │────▶│   Collision   │────▶│   Audio     │
-│  (MediaPipe)   │     │   Detection   │     │  (Web Audio) │
-└────────────────┘     └──────────────┘     └─────────────┘
+┌──────────┐   frames    ┌──────────────┐  landmarks  ┌────────────────┐
+│  Camera   │───────────▶│ MediaPipe     │────────────▶│ NoteRecognizer │
+│ (WebRTC)  │            │ Hands         │             │ (overlap logic)│
+└──────────┘             └──────────────┘             └───────┬────────┘
+      │                                                       │ pressed shapes
+      │  on demand        ┌──────────────┐  shapes            ▼
+      └──────────────────▶│ OpenCV.js    │───────────▶ NoteRecognizer
+                          │ ShapeDetector│                    │
+                          └──────────────┘                    │ note-on / note-off
+                                                              ▼
+                                                      ┌──────────────┐
+                                                      │ AudioEngine  │
+                                                      │ (Web Audio)  │
+                                                      └──────────────┘
 ```
 
-| Layer | Technology | Purpose |
+| Component | Technology | Purpose |
 |---|---|---|
-| Camera | WebRTC `getUserMedia` | Live video feed |
-| Shape Detection | OpenCV.js (adaptive threshold + contour approximation) | Find drawn rectangles on paper |
-| Note Recognition | Tesseract.js (OCR, single-word mode) | Read note names (C, D#, F, etc.) |
-| Hand Tracking | MediaPipe Tasks-Vision `HandLandmarker` | Real-time finger position tracking |
-| Audio Synthesis | Web Audio API (multi-oscillator + ADSR envelope) | Low-latency musical note playback |
-| Rendering | Canvas 2D | Overlay shapes, labels, hand skeleton |
+| **Camera** | WebRTC `getUserMedia` | Live video feed |
+| **Hand tracking** | MediaPipe Hands (Solutions API) | 21-landmark hand skeleton at ~30 fps |
+| **Shape detection** | OpenCV.js (contours, polygon approx) | Rectangles → keys, Circles → drum pads |
+| **Note mapping** | Custom JS | Classify white/black keys, assign notes, resolve overlaps |
+| **Audio** | Web Audio API (oscillators + noise) | Real-time piano & drum synthesis |
 
-### Why a Web App?
+### Why a web app?
 
-- **Zero install** — works in any modern browser (Chrome, Edge, Firefox).
-- **Instant camera access** via WebRTC.
-- **Web Audio API** delivers ≈5–20 ms audio latency (interactive-quality).
-- **MediaPipe runs in-browser** with GPU acceleration via WebAssembly + WebGL.
-- **Perfect for demos** — share a URL, not a binary.
+* Zero install — works in any modern browser
+* WebRTC + Web Audio API give native access to camera and low-latency sound
+* MediaPipe & OpenCV.js run entirely client-side (no server needed)
+* Easily shareable via a URL for a hackathon demo
 
 ---
 
@@ -44,147 +44,148 @@ Paper Piano uses your webcam to detect shapes drawn on paper, reads the note nam
 
 ### Shape Detection (OpenCV.js)
 
-1. Capture a single frame when the user clicks **Scan Paper**.
-2. Convert to grayscale → Gaussian blur (5×5) → adaptive threshold (Gaussian, block 15, C=4).
-3. Morphological close + dilate to fill gaps in hand-drawn lines.
-4. `findContours` with `RETR_EXTERNAL` to get outer contours only.
-5. `approxPolyDP` to simplify each contour to a polygon.
-6. Filter: 4–10 vertices, area between 0.2%–25% of frame, reasonable aspect ratio.
-7. Sort shapes left-to-right, top-to-bottom for consistent note assignment.
+1. **Downsample** the video frame to 640 px wide (speed over fidelity).
+2. **Grayscale → Gaussian blur → Adaptive threshold** produces a clean binary image of dark ink on white paper.
+3. **Morphological close** merges broken contour segments from imperfect drawings.
+4. **`findContours`** extracts external contours only.
+5. For each contour:
+   * **`approxPolyDP`** simplifies vertices.
+   * **Circularity** = 4π · area / perimeter². High → circle. Low → rectangle.
+   * **Extent** = contour area / bounding-rect area. Rejects noisy blobs.
 
-### Note Recognition (Tesseract.js)
+### Handling imperfect & overlapping shapes
 
-1. For each detected shape, crop the interior (with padding to exclude borders).
-2. Scale up 2–4× and binarise (threshold at luminance 130) for high-contrast input.
-3. Run Tesseract in single-word mode with a whitelist of `A-G` and `#`.
-4. Parse the result into a valid note name (e.g., `C`, `F#`, `Bb`).
-5. **Fallback**: if OCR fails or is unavailable, assign C-D-E-F-G-A-B sequentially.
-6. Users can click any shape to manually reassign its note.
+* `approxPolyDP` with ε = 3 % of perimeter tolerates wobbly lines.
+* Rectangles are accepted with 4–7 vertices (hand-drawn corners are never perfect).
+* Circles need circularity ≥ 0.55 — generous enough for ovals.
 
-### Finger Press Detection (MediaPipe)
+### White vs Black Key Classification
 
-1. `HandLandmarker` runs on every frame in `VIDEO` mode at up to 30 fps.
-2. For each detected hand, extract all 5 fingertip landmarks (indices 4, 8, 12, 16, 20).
-3. Convert normalised (0–1) coordinates to canvas pixel space.
-4. Test each fingertip against each shape's bounding rectangle.
-5. **Note-on** when a fingertip enters a shape that wasn't active; **note-off** when it leaves.
-6. Multiple fingers and hands are supported simultaneously.
+* Keys are sorted by area. Anything below 65 % of the largest rectangle is classified as a **black key**.
+* A fallback checks height ratios if area alone isn't conclusive.
+* Black keys receive `priority = 1`; white keys `priority = 0`.
 
----
+### Finger Press Detection (MediaPipe Hands)
 
-## Audio Generation Approach
-
-- **Web Audio API** with `OscillatorNode` for zero-download, zero-decode latency.
-- Each note is synthesised from **3 oscillators** (fundamental + octave harmonic + sub-harmonic) for a richer timbre.
-- **ADSR envelope** via `GainNode` scheduling:
-  - Attack: 8 ms (near-instant onset)
-  - Decay: 250 ms
-  - Sustain: held while finger is in shape
-  - Release: 200 ms smooth fade-out
-- A `DynamicsCompressorNode` prevents clipping when many notes play simultaneously.
-- `AudioContext` is created with `latencyHint: 'interactive'` for minimum buffer size.
-- Three instrument presets: **Piano** (triangle wave), **Organ** (sine harmonics), **Synth** (sawtooth + detuning).
+* Every frame, the index/middle/ring/pinky/thumb tips' normalised (x, y) are mapped to pixel coordinates.
+* A **point-in-shape** test (rectangle bounds or circle radius) determines if a fingertip overlaps a shape.
+* An extra **sensitivity padding** (slider-controlled, 0–30 px) enlarges the hit area for ease of use.
+* **Overlap resolution**: if a tip is inside both a white and black key, the black key wins (higher priority, smaller area).
 
 ---
 
-## How to Run
+## Audio Generation
+
+### Piano
+
+Each key triggers a multi-partial **additive synthesiser**:
+
+* **Fundamental** (triangle wave) + **2nd, 3rd, 5th harmonics** (sine) with decreasing gain.
+* An **ADSR envelope** (attack 8 ms, decay 180 ms, sustain at 0.30, release 120 ms) shapes the amplitude for a natural piano-like timbre.
+* Multiple notes can sound simultaneously — a `DynamicsCompressor` node prevents clipping.
+
+### Drums
+
+Synthesised one-shot sounds:
+
+| Pad | Technique |
+|---|---|
+| **Kick** | Sine oscillator with fast pitch sweep 150 → 35 Hz |
+| **Snare** | White noise burst (HP-filtered) + triangle body tone |
+| **Hi-hat** | HP-filtered noise, very short (50 ms) |
+| **Tom** | Sine with pitch drop, medium decay |
+| **Crash** | Band-pass noise, long decay (0.5 s) |
+
+---
+
+## Running Locally
 
 ### Prerequisites
 
-- A modern browser (Chrome 90+ or Edge recommended for best MediaPipe support).
-- A webcam or phone camera.
-- Python 3 (for the local server) — or any static HTTP server.
+* A modern browser (Chrome / Edge recommended)
+* A working webcam
+* A simple local HTTP server (required for camera access — `file://` won't work)
+
+### Quick start
+
+```bash
+# Navigate to the project folder
+cd PaperPiano
+
+# Option 1: Python
+python -m http.server 8000
+
+# Option 2: Node / npx
+npx serve .
+
+# Option 3: VS Code Live Server extension
+# Right-click index.html → "Open with Live Server"
+```
+
+Then open **http://localhost:8000** (or the port shown).
 
 ### Steps
 
-```bash
-# 1. Clone / download into a folder
-cd PaperPiano
+1. Click **Start Camera** and grant camera permission.
+2. Wait for the three status dots (Camera / Hands / Vision) to turn green.
+3. Draw **rectangles** (piano keys) and/or **circles** (drum pads) on white paper with a dark marker.
+4. Point the camera at the paper and click **Scan Shapes**.
+5. The detected shapes appear as colored overlays with note labels.
+6. Press the shapes with your fingertips — notes play instantly!
 
-# 2. Start a local HTTP server (required for ES modules + camera)
-python -m http.server 8000
+### Controls
 
-# 3. Open in your browser
-#    Navigate to: http://localhost:8000
-```
-
-> **Important:** Camera access requires `localhost` or HTTPS. Opening `index.html` directly via `file://` will not work.
-
-### Quick Test (No Paper Needed)
-
-1. Open the app → wait for models to load (10–30 seconds first time; cached after).
-2. Click **Demo Shapes** — seven piano keys appear on screen.
-3. Click **Play** → move your hand in front of the camera.
-4. Your fingertips touching the on-screen key regions will play notes!
-
-### Full Paper Mode
-
-1. Draw dark-outlined rectangles on white paper with a marker.
-2. Write a note name inside each: **C**, **D**, **E**, **F**, **G**, **A**, **B** (or **C#**, **Db**, etc.).
-3. Hold paper up to the camera (or place on desk with camera looking down).
-4. Click **Scan Paper** → shapes are detected and notes are read.
-5. Click any shape to correct its note if OCR was wrong.
-6. Click **Play** → touch the paper shapes with your finger!
+| Control | Effect |
+|---|---|
+| **Scan Shapes** | Run shape detection on the current frame |
+| **Auto: ON/OFF** | Re-scan every 2.5 s automatically |
+| **Mirror** | Flip the video horizontally (useful for front-facing webcam) |
+| **Octave** | Shift the piano mapping (2–6) |
+| **Sensitivity** | Expand the touch hit-area |
+| **Debug** | Show the thresholded image and shape assignments |
 
 ---
 
 ## Performance Considerations
 
-| Concern | Mitigation |
-|---|---|
-| **Audio latency** | `latencyHint: 'interactive'` + OscillatorNode (no decode step) → ~5–20 ms |
-| **Shape detection cost** | Run once on scan, not per-frame; shapes are cached |
-| **OCR cost** | Run once per shape after detection; cached results |
-| **Hand tracking FPS** | MediaPipe uses GPU via WebGL/WebGPU; typically 25–45 fps on laptops |
-| **Memory (OpenCV)** | All cv.Mat objects tracked and explicitly deleted to prevent WASM heap leaks |
-| **Large downloads** | Libraries loaded async + cached by browser; loading screen shown |
+* **Hand tracking** is the bottleneck (~20–40 ms per frame). Using `modelComplexity: 0` (Lite) keeps latency under 40 ms on most devices.
+* **Shape detection** is expensive (~50–100 ms) but only runs on demand (button click or 2.5 s interval), never every frame.
+* **Audio latency** is minimal — the Web Audio API schedules oscillator start within 1–2 ms of the call.
+* The processing canvas is **downsampled to 640 px** wide to keep contour detection fast.
+* Rendering uses a simple 2-D canvas overlay — no heavy GPU compositing.
 
 ---
 
-## Limitations
+## Limitations & Future Improvements
 
-1. **Handwriting OCR** is unreliable for messy or small text. The manual note-assignment UI mitigates this.
-2. **Shape detection** works best with dark, closed rectangles on clean white paper. Complex or overlapping shapes may not be detected.
-3. **Finger-shape mapping** is 2D only — it checks if the fingertip's projection overlaps the shape's projection. Extreme camera angles may reduce accuracy.
-4. **Paper must stay still** after scanning. If you move the paper, the cached shape positions become invalid (re-scan to fix).
-5. **First load** downloads ~15 MB of models (OpenCV WASM + Tesseract language data + MediaPipe hand model). Subsequent loads are cached.
-6. **Mobile browser support** varies — Chrome on Android works best; Safari on iOS has limited MediaPipe support.
+### Current limitations
 
----
+* **No OCR** — notes are auto-assigned left-to-right, not read from handwriting inside shapes.
+* **Perspective distortion** — works best with the camera directly above the paper. Angled views may distort bounding boxes.
+* **Lighting sensitivity** — adaptive thresholding helps, but very uneven lighting or glossy paper can confuse contour detection.
+* **No velocity sensitivity** — all notes play at the same volume (MediaPipe z-depth is not reliable enough for pressure mapping).
+* **OpenCV.js load time** — the library is ~8 MB and can take a few seconds to download on slower connections.
 
-## Future Improvements
+### Possible improvements
 
-- **Continuous shape tracking** using optical flow or feature matching to handle paper movement.
-- **Custom ML model** (e.g., a small CNN) trained specifically for handwritten note recognition, replacing Tesseract.
-- **Velocity sensitivity** based on finger approach speed (faster = louder).
-- **Multi-octave support** — recognise octave numbers (C4, C5) or detect shape size → octave mapping.
-- **Sampled instruments** — load real piano/drum samples instead of oscillator synthesis.
-- **MIDI output** — send detected notes as MIDI messages to external synthesisers.
-- **Collaborative mode** — multiple people around a table, each scanning their section.
-- **Shape types** — circles for drum pads, triangles for effects, rectangles for melodic notes.
-- **Recording & playback** — record performances and export as audio or MIDI.
-- **AR overlay** — use WebXR to project the overlay directly onto the paper.
+* **Tesseract.js OCR** to read handwritten note names inside shapes.
+* **Perspective correction** — detect the paper quadrilateral and warp to a top-down view before scanning.
+* **WebGL compute** or **TensorFlow.js** custom model for faster, more accurate shape classification.
+* **Sampled audio** — replace oscillator synth with actual piano / drum samples for higher fidelity.
+* **Multi-octave layout** detection based on physical key arrangement.
+* **Web Worker** for OpenCV processing to keep the main thread free.
+* **PWA packaging** for offline use and "install to home screen" on mobile.
 
 ---
 
-## Project Structure
+## Tech Stack
 
-```
-PaperPiano/
-├── index.html              Main page (loads libraries + app module)
-├── css/
-│   └── style.css           Dark theme UI styling
-├── js/
-│   ├── main.js             App orchestrator (state, events, render loop)
-│   ├── audio-engine.js     Web Audio synthesis + ADSR + presets
-│   ├── shape-detector.js   OpenCV.js contour-based shape detection
-│   ├── note-recognizer.js  Tesseract.js OCR + note parsing
-│   └── hand-tracker.js     MediaPipe hand landmark tracking
-└── README.md               This file
-```
+* **HTML5 / CSS3 / Vanilla JS** — no build tools, no frameworks
+* **MediaPipe Hands** — real-time hand landmark detection
+* **OpenCV.js 4.9** — computer-vision contour analysis
+* **Web Audio API** — low-latency sound synthesis
+* **WebRTC** — live camera access
 
 ---
 
-## License
-
-MIT — built for QHacks 2026. Have fun making music! 🎶
+*Built for QHacks 2026*

@@ -3,89 +3,133 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Paper Piano — Draw &amp; Play Music</title>
+    <title>Paper Piano — Draw &amp; Play</title>
     <link rel="stylesheet" href="css/style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎹</text></svg>">
 </head>
 <body>
-    <div id="app">
+    <!-- ======== Splash / Start Screen ======== -->
+    <div id="splash">
+        <div class="splash-content">
+            <h1 class="logo">Paper Piano</h1>
+            <p class="tagline">Draw instruments on paper. Play them with your fingers.</p>
 
-        <!-- ════════ Loading Screen ════════ -->
-        <div id="loading-screen">
-            <div class="loader-box">
-                <h1>🎹 Paper Piano</h1>
-                <p>Draw instruments on paper and play them with your hands</p>
-                <div class="spinner"></div>
-                <div id="loading-status">Initializing…</div>
-            </div>
-        </div>
-
-        <!-- ════════ Main Interface ════════ -->
-        <div id="main-interface" class="hidden">
-
-            <!-- Status bar -->
-            <div id="status-bar">
-                <span id="status-text">Loading…</span>
-                <span id="fps-counter">-- FPS</span>
-            </div>
-
-            <!-- Camera + overlay -->
-            <div id="camera-container">
-                <video id="video" autoplay playsinline muted></video>
-                <canvas id="overlay-canvas"></canvas>
-                <canvas id="processing-canvas"></canvas>
+            <div class="instructions">
+                <div class="step">
+                    <span class="step-num">1</span>
+                    <p>Draw <strong>rectangles</strong> (piano keys) and <strong>circles</strong> (drum pads) on white paper with a dark marker.</p>
+                </div>
+                <div class="step">
+                    <span class="step-num">2</span>
+                    <p>Point your camera at the paper and click <em>Scan Shapes</em>.</p>
+                </div>
+                <div class="step">
+                    <span class="step-num">3</span>
+                    <p>Press the shapes with your fingertips to play music!</p>
+                </div>
             </div>
 
-            <!-- Controls -->
-            <div id="controls">
-                <button id="btn-scan" class="btn btn-primary" title="Detect shapes on paper">
-                    <span class="btn-icon">📷</span> Scan Paper
-                </button>
-                <button id="btn-demo" class="btn btn-accent" title="Add preset piano keys">
-                    <span class="btn-icon">🎹</span> Demo Shapes
-                </button>
-                <button id="btn-play" class="btn btn-success hidden" disabled title="Enter play mode">
-                    <span class="btn-icon">▶</span> Play
-                </button>
-                <button id="btn-stop" class="btn btn-warning hidden" title="Stop playing">
-                    <span class="btn-icon">⏹</span> Stop
-                </button>
-                <button id="btn-clear" class="btn btn-danger hidden" title="Remove all shapes">
-                    <span class="btn-icon">✖</span> Clear
-                </button>
-
-                <div class="control-divider"></div>
-
-                <label class="select-wrap" title="Instrument sound">
-                    🎛️
-                    <select id="instrument-select">
-                        <option value="piano">Piano</option>
-                        <option value="organ">Organ</option>
-                        <option value="synth">Synth</option>
-                    </select>
-                </label>
-            </div>
-        </div>
-
-        <!-- ════════ Note Editor Modal ════════ -->
-        <div id="note-editor" class="hidden">
-            <div class="modal-backdrop"></div>
-            <div class="modal-content">
-                <h3>Assign Note to Shape</h3>
-                <div id="note-buttons"></div>
-                <button id="btn-close-editor" class="btn btn-secondary">Cancel</button>
-            </div>
+            <button id="startBtn" class="btn-primary">Start Camera</button>
+            <p class="note">Requires camera &amp; microphone permissions. Works best in Chrome.</p>
         </div>
     </div>
 
-    <!-- ════════ External Libraries (CDN) ════════ -->
-    <!-- OpenCV.js – computer vision for shape detection -->
-    <script async src="https://docs.opencv.org/4.10.0/opencv.js"></script>
-    <!-- Tesseract.js – OCR for reading note names -->
-    <script async src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <!-- MediaPipe is loaded dynamically as an ES module inside hand-tracker.js -->
+    <!-- ======== Main Application ======== -->
+    <div id="app" class="hidden">
+        <!-- Status indicators -->
+        <div id="statusBar">
+            <div class="status-item" id="cameraStatus">
+                <span class="dot"></span> Camera
+            </div>
+            <div class="status-item" id="handStatus">
+                <span class="dot"></span> Hands
+            </div>
+            <div class="status-item" id="cvStatus">
+                <span class="dot"></span> Vision
+            </div>
+            <div id="fps">-- fps</div>
+        </div>
 
-    <!-- ════════ Application (ES modules) ════════ -->
-    <script type="module" src="js/main.js"></script>
+        <!-- Camera + overlay -->
+        <div id="cameraContainer">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+            <div id="loadingOverlay">
+                <div class="spinner"></div>
+                <p id="loadingText">Initializing camera…</p>
+            </div>
+        </div>
+
+        <!-- Bottom controls -->
+        <div id="controls">
+            <div class="controls-row">
+                <button id="scanBtn" class="btn-ctrl" disabled>
+                    <span class="icon">&#128269;</span> Scan Shapes
+                </button>
+                <button id="autoScanBtn" class="btn-ctrl">
+                    <span class="icon">&#128260;</span> Auto: OFF
+                </button>
+                <button id="mirrorBtn" class="btn-ctrl">
+                    <span class="icon">&#128260;</span> Mirror
+                </button>
+            </div>
+
+            <div class="controls-row">
+                <label class="slider-label">
+                    Octave <span id="octaveVal">4</span>
+                    <input type="range" id="octaveSlider" min="2" max="6" value="4">
+                </label>
+                <label class="slider-label">
+                    Sensitivity
+                    <input type="range" id="sensitivitySlider" min="10" max="100" value="50">
+                </label>
+                <button id="debugBtn" class="btn-ctrl btn-small">Debug</button>
+            </div>
+        </div>
+
+        <!-- Active-note heads-up -->
+        <div id="noteHUD"></div>
+
+        <!-- Shape counter badge -->
+        <div id="shapeBadge" class="hidden">
+            <span id="keyCount">0</span> keys &middot;
+            <span id="padCount">0</span> pads
+        </div>
+
+        <!-- Shape editor popup -->
+        <div id="shapeEditor" class="hidden">
+            <div class="editor-header">
+                <span id="editorTitle">Edit Shape</span>
+                <button id="editorClose" class="editor-close">&times;</button>
+            </div>
+            <div id="editorBody"></div>
+        </div>
+
+        <!-- Debug overlay -->
+        <div id="debugPanel" class="hidden">
+            <canvas id="debugCanvas"></canvas>
+            <pre id="debugInfo"></pre>
+        </div>
+    </div>
+
+    <!-- ============ External Libraries ============ -->
+    <!-- MediaPipe Hands (legacy Solutions API — works with plain script tags) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+            crossorigin="anonymous"></script>
+
+    <!-- OpenCV.js (loaded async — shape detection waits for it) -->
+    <script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"
+            type="text/javascript"
+            id="opencvScript"></script>
+
+    <!-- ============ Application Scripts ============ -->
+    <script src="js/audio-engine.js"></script>
+    <script src="js/hand-tracker.js"></script>
+    <script src="js/shape-detector.js"></script>
+    <script src="js/note-recognizer.js"></script>
+    <script src="js/main.js"></script>
 </body>
 </html>

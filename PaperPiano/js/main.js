@@ -1,645 +1,603 @@
-/**
- * PaperPiano - Main application orchestrator.
- *
- * Pipeline:
- *   1. Load → camera + OpenCV + Tesseract + MediaPipe in parallel
- *   2. Ready → live camera feed, user can scan
- *   3. Scanning → freeze frame → OCR full frame → shape detect with seeds
- *   4. Editing → contour-based shapes visible, user edits note assignments
- *   5. Playing → hand tracking, point-in-polygon hit test → note plays
- *
- * Key improvements over v1:
- *   - Text-first: OCR finds note labels first, shapes grow from those seeds
- *   - Contour-based hitboxes (not bounding rectangles)
- *   - Point-in-polygon for finger presses
- *   - Debug overlay shows text anchors, contour outlines, hand skeleton
- */
+/* =========================================================
+   main.js — Paper Piano application controller
+   =========================================================
+   Boots every subsystem, runs the render loop, and wires
+   UI controls.
+   ========================================================= */
+'use strict';
 
-import { AudioEngine }    from './audio-engine.js';
-import { ShapeDetector }  from './shape-detector.js';
-import { NoteRecognizer } from './note-recognizer.js';
-import { HandTracker }    from './hand-tracker.js';
+(function () {
 
-// ── Shape colours ──────────────────────────────────────────────────────────────
-const SHAPE_COLORS = [
-    '#FF6B6B', '#FF9F43', '#FECA57', '#48DBFB',
-    '#0ABDE3', '#A29BFE', '#FD79A8', '#00B894',
-    '#6C5CE7', '#E17055', '#00CEC9', '#FDCB6E'
-];
+    /* ==============================================================
+       DOM handles
+       ============================================================== */
+    const $splash        = document.getElementById('splash');
+    const $app           = document.getElementById('app');
+    const $startBtn      = document.getElementById('startBtn');
 
-// ── Hand-skeleton connections for drawing ──────────────────────────────────────
-const HAND_CONNECTIONS = [
-    [0,1],[1,2],[2,3],[3,4],
-    [0,5],[5,6],[6,7],[7,8],
-    [5,9],[9,10],[10,11],[11,12],
-    [9,13],[13,14],[14,15],[15,16],
-    [13,17],[17,18],[18,19],[19,20],
-    [0,17]
-];
+    const $video         = document.getElementById('video');
+    const $overlay       = document.getElementById('overlay');
+    const $loadingOvr    = document.getElementById('loadingOverlay');
+    const $loadingTxt    = document.getElementById('loadingText');
 
-class PaperPianoApp {
-    constructor() {
-        // Modules
-        this.audio     = new AudioEngine();
-        this.shapes_   = new ShapeDetector();
-        this.ocr       = new NoteRecognizer();
-        this.hands     = new HandTracker();
+    const $scanBtn       = document.getElementById('scanBtn');
+    const $autoScanBtn   = document.getElementById('autoScanBtn');
+    const $mirrorBtn     = document.getElementById('mirrorBtn');
 
-        // State
-        this.shapes       = [];
-        this.activeShapes = new Set();
-        this.state        = 'loading';
-        this.lastHandRes  = null;
-        this.animId       = null;
-        this.mirrored     = false;
+    const $octaveSlider  = document.getElementById('octaveSlider');
+    const $octaveVal     = document.getElementById('octaveVal');
+    const $sensSlider    = document.getElementById('sensitivitySlider');
 
-        // FPS counter
-        this._fpsFrames = 0;
-        this._fpsLast   = 0;
-        this.fps        = 0;
+    const $debugBtn      = document.getElementById('debugBtn');
+    const $debugPanel    = document.getElementById('debugPanel');
+    const $debugCanvas   = document.getElementById('debugCanvas');
+    const $debugInfo     = document.getElementById('debugInfo');
 
-        // DOM refs
-        this.video = null;
-        this.overlay = null;
-        this.octx = null;
-        this.proc = null;
-        this.pctx = null;
-    }
+    const $noteHUD       = document.getElementById('noteHUD');
+    const $shapeBadge    = document.getElementById('shapeBadge');
+    const $keyCount      = document.getElementById('keyCount');
+    const $padCount      = document.getElementById('padCount');
+    const $fpsEl         = document.getElementById('fps');
 
-    // ── Bootstrap ──────────────────────────────────────────────────────────────
-    async init() {
-        this.bindElements();
-        this.bindEvents();
+    const $camDot        = document.querySelector('#cameraStatus .dot');
+    const $handDot       = document.querySelector('#handStatus .dot');
+    const $cvDot         = document.querySelector('#cvStatus .dot');
 
-        // ── Load camera + all ML libraries in parallel, show progress ──────
-        const results = await Promise.allSettled([
-            this.initCamera(),
-            this.shapes_.init(s => this.status(s)),
-            this.ocr.init(s => this.status(s)),
-            this.hands.init(s => this.status(s))
-        ]);
+    /* ==============================================================
+       Subsystems
+       ============================================================== */
+    const audio  = new AudioEngine();
+    const hands  = new HandTracker();
+    const shapes = new ShapeDetector();
+    const notes  = new NoteRecognizer();
 
-        const [cam, ocv, ocrRes, handsRes] = results;
+    /* ==============================================================
+       State
+       ============================================================== */
+    let running       = false;
+    let mirrored      = false;
+    let autoScan      = false;
+    let autoScanTimer = null;
+    let showDebug     = false;
 
-        if (cam.status === 'rejected') {
-            this.showError('Camera access denied. Allow camera and reload the page.');
-            return;
-        }
+    let prevPressed   = new Set();      // shape ids currently held
+    let activeHUD     = new Map();      // id → timeout handle
 
-        if (ocv.status === 'rejected')     console.warn('OpenCV unavailable:', ocv.reason);
-        if (ocrRes.status === 'rejected')  console.warn('OCR unavailable:', ocrRes.reason);
-        if (handsRes.status === 'rejected') console.warn('Hand tracking unavailable:', handsRes.reason);
+    // FPS tracking
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
 
-        this.hideLoading();
-        this.state = 'ready';
-        this.status(
-            this.shapes_.ready
-                ? 'Ready — point camera at drawn shapes, then press Scan.'
-                : 'OpenCV unavailable — use "Demo Shapes" to start.'
-        );
-        this.startRenderLoop();
-    }
+    /* ==============================================================
+       Boot
+       ============================================================== */
+    $startBtn.addEventListener('click', async () => {
+        audio.init();                    // must happen inside user gesture
+        $splash.classList.add('hidden');
+        $app.classList.remove('hidden');
+        await boot();
+    });
 
-    // ── DOM binding ────────────────────────────────────────────────────────────
-    bindElements() {
-        this.video   = document.getElementById('video');
-        this.overlay = document.getElementById('overlay-canvas');
-        this.octx    = this.overlay.getContext('2d');
-        this.proc    = document.getElementById('processing-canvas');
-        this.pctx    = this.proc.getContext('2d');
-    }
-
-    bindEvents() {
-        const $ = id => document.getElementById(id);
-
-        $('btn-scan').addEventListener('click',  () => this.scanShapes());
-        $('btn-demo').addEventListener('click',  () => this.addDemoShapes());
-        $('btn-play').addEventListener('click',  () => this.enterPlayMode());
-        $('btn-stop').addEventListener('click',  () => this.exitPlayMode());
-        $('btn-clear').addEventListener('click', () => this.clearShapes());
-        $('btn-close-editor').addEventListener('click', () => this.closeNoteEditor());
-
-        $('instrument-select').addEventListener('change', e => {
-            this.audio.setPreset(e.target.value);
-        });
-
-        this.overlay.addEventListener('click', e => this.onCanvasClick(e));
-        this.overlay.addEventListener('touchstart', e => this.onCanvasTouch(e), { passive: false });
-        this.overlay.addEventListener('touchmove',  e => this.onCanvasTouch(e), { passive: false });
-        this.overlay.addEventListener('touchend',   e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
-        this.overlay.addEventListener('touchcancel', e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
-
-        const resumeAudio = () => { this.audio.init(); this.audio.resume(); };
-        document.addEventListener('click',      resumeAudio, { once: true });
-        document.addEventListener('touchstart', resumeAudio, { once: true });
-    }
-
-    // ── Camera ─────────────────────────────────────────────────────────────────
-    async initCamera() {
-        this.status('Requesting camera…');
-
-        let stream;
+    async function boot () {
         try {
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 640 }, height: { ideal: 480 },
-                         frameRate: { ideal: 30, min: 15 }, facingMode: 'environment' },
-                audio: false
-            });
-            this.mirrored = false;
-        } catch {
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: { ideal: 640 }, height: { ideal: 480 },
-                         frameRate: { ideal: 30, min: 15 } },
-                audio: false
-            });
-            this.mirrored = true;
-        }
-
-        const track = stream.getVideoTracks()[0];
-        const settings = track.getSettings?.() || {};
-        if (settings.facingMode === 'user') this.mirrored = true;
-        if (!settings.facingMode) this.mirrored = true;
-
-        this.video.srcObject = stream;
-        await this.video.play();
-
-        const vw = this.video.videoWidth;
-        const vh = this.video.videoHeight;
-        this.overlay.width  = vw;
-        this.overlay.height = vh;
-        this.proc.width     = vw;
-        this.proc.height    = vh;
-
-        this.status(`Camera active ✓${this.mirrored ? ' (mirrored)' : ''}`);
-    }
-
-    // ── Scanning (text-first pipeline) ─────────────────────────────────────────
-    async scanShapes() {
-        if (!this.shapes_.ready) {
-            this.status('OpenCV is still loading… please wait a moment, then try again.');
-            return;
-        }
-        this.state = 'scanning';
-        this.status('Scanning for shapes…');
-
-        // Draw current video frame to hidden processing canvas
-        this.pctx.drawImage(this.video, 0, 0);
-
-        // ── Step 1: Run full-frame OCR to find text seeds ──────────────────
-        let textSeeds = [];
-        if (this.ocr.ready) {
-            this.status('Running OCR to find note labels…');
-            const ocrPrep = this.shapes_.prepareForOCR(this.proc);
-            const rawSeeds = await this.ocr.detectAll(ocrPrep.canvas);
-
-            // Scale seed coordinates back to original frame size
-            const invScale = 1 / ocrPrep.scale;
-            textSeeds = rawSeeds.map(s => ({
-                ...s,
-                bbox: {
-                    x:      Math.round(s.bbox.x * invScale),
-                    y:      Math.round(s.bbox.y * invScale),
-                    width:  Math.round(s.bbox.width * invScale),
-                    height: Math.round(s.bbox.height * invScale)
+            /* ---- camera ---- */
+            setLoading('Starting camera…');
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    width:      { ideal: 1280 },
+                    height:     { ideal: 720 },
+                    facingMode: 'environment',
                 },
-                center: {
-                    x: Math.round(s.center.x * invScale),
-                    y: Math.round(s.center.y * invScale)
-                }
-            }));
-
-            if (textSeeds.length > 0) {
-                this.status(`Found ${textSeeds.length} note label(s) — detecting shapes…`);
-            } else {
-                this.status('No note labels found — trying contour-only detection…');
-            }
-        }
-
-        // ── Step 2: Detect shapes using text seeds ─────────────────────────
-        const found = this.shapes_.detectWithSeeds(this.proc, textSeeds);
-
-        if (found.length === 0) {
-            this.status('No shapes found. Draw dark-outlined rectangles on white paper with note names inside.');
-            this.state = 'ready';
-            return;
-        }
-
-        // ── Step 3: Assign notes (from seeds, per-region OCR, or defaults) ─
-        for (let i = 0; i < found.length; i++) {
-            const s = found[i];
-            s.color    = SHAPE_COLORS[i % SHAPE_COLORS.length];
-            s.isActive = false;
-
-            // If the text-first pipeline already assigned a note, use it
-            if (s.note) continue;
-
-            // Otherwise try per-region OCR fallback
-            if (this.ocr.ready) {
-                const crop = this.shapes_.extractRegion(this.proc, s.rect);
-                if (crop) {
-                    const note = await this.ocr.recognize(crop);
-                    s.note = note || this.ocr.getDefaultNote(i);
-                    continue;
-                }
-            }
-
-            // Last resort: default scale
-            s.note = this.ocr.getDefaultNote(i);
-        }
-
-        this.shapes = found;
-        this.state  = 'ready';
-        this.showPlayControls();
-        this.status(`${found.length} shape(s) detected. Click a shape to change its note, then press Play.`);
-    }
-
-    // ── Demo shapes ────────────────────────────────────────────────────────────
-    addDemoShapes() {
-        const W = this.overlay.width;
-        const H = this.overlay.height;
-
-        const notes  = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-        const gap    = 4;
-        const kw     = Math.floor((W - gap * (notes.length + 1)) / notes.length);
-        const kh     = Math.floor(H * 0.28);
-        const startY = Math.floor(H * 0.65);
-        const startX = Math.floor((W - (kw * notes.length + gap * (notes.length - 1))) / 2);
-
-        this.shapes = notes.map((note, i) => {
-            const lx = startX + i * (kw + gap);
-            const ly = startY;
-            return {
-                id:       `shape_${i}`,
-                rect:     { x: lx, y: ly, width: kw, height: kh },
-                polygon:  [
-                    { x: lx,          y: ly },
-                    { x: lx + kw,     y: ly },
-                    { x: lx + kw,     y: ly + kh },
-                    { x: lx,          y: ly + kh }
-                ],
-                note,
-                color:    SHAPE_COLORS[i % SHAPE_COLORS.length],
-                center:   { x: lx + kw / 2, y: ly + kh / 2 },
-                textPos:  null,
-                isActive: false,
-                area:     kw * kh
-            };
-        });
-
-        this.showPlayControls();
-        this.status('Demo piano ready. Press Play!');
-    }
-
-    // ── Play / Stop mode ───────────────────────────────────────────────────────
-    enterPlayMode() {
-        if (!this.shapes.length) return;
-        this.audio.init();
-        this.audio.resume();
-        this.state = 'playing';
-
-        document.getElementById('btn-scan').classList.add('hidden');
-        document.getElementById('btn-demo').classList.add('hidden');
-        document.getElementById('btn-play').classList.add('hidden');
-        document.getElementById('btn-stop').classList.remove('hidden');
-        document.getElementById('btn-clear').classList.remove('hidden');
-
-        this.status(this.hands.ready
-            ? '🎵 Play mode — touch the shapes with your finger!'
-            : '🎵 Play mode — tap / click shapes to play (hand tracking unavailable).');
-    }
-
-    exitPlayMode() {
-        this.audio.noteOffAll();
-        this.activeShapes.clear();
-        this.shapes.forEach(s => s.isActive = false);
-        this.state = 'ready';
-
-        document.getElementById('btn-scan').classList.remove('hidden');
-        document.getElementById('btn-demo').classList.remove('hidden');
-        this.showPlayControls();
-        document.getElementById('btn-stop').classList.add('hidden');
-
-        this.status('Stopped. Edit note assignments or press Play again.');
-    }
-
-    clearShapes() {
-        this.audio.noteOffAll();
-        this.activeShapes.clear();
-        this.shapes = [];
-        this.state  = 'ready';
-
-        document.getElementById('btn-scan').classList.remove('hidden');
-        document.getElementById('btn-demo').classList.remove('hidden');
-        document.getElementById('btn-play').classList.add('hidden');
-        document.getElementById('btn-stop').classList.add('hidden');
-        document.getElementById('btn-clear').classList.add('hidden');
-
-        this.status('Cleared. Scan paper or add demo shapes.');
-    }
-
-    showPlayControls() {
-        document.getElementById('btn-play').disabled = false;
-        document.getElementById('btn-play').classList.remove('hidden');
-        document.getElementById('btn-clear').classList.remove('hidden');
-    }
-
-    // ── Canvas interaction ─────────────────────────────────────────────────────
-    onCanvasClick(e) {
-        const pos = this.canvasPos(e.clientX, e.clientY);
-        const shape = this.shapeAt(pos.x, pos.y);
-        if (!shape) return;
-
-        if (this.state === 'playing') {
-            this.audio.init();
-            this.audio.noteOn(shape.id, shape.note);
-            shape.isActive = true;
-            setTimeout(() => {
-                this.audio.noteOff(shape.id);
-                shape.isActive = false;
-            }, 250);
-        } else {
-            this.openNoteEditor(shape.id);
-        }
-    }
-
-    onCanvasTouch(e) {
-        e.preventDefault();
-        if (this.state !== 'playing') return;
-
-        const nowActive = new Set();
-        for (const touch of e.touches) {
-            const pos = this.canvasPos(touch.clientX, touch.clientY);
-            const shape = this.shapeAt(pos.x, pos.y);
-            if (shape) {
-                nowActive.add(shape.id);
-                if (!this.activeShapes.has(shape.id)) {
-                    this.audio.noteOn(shape.id, shape.note);
-                }
-                shape.isActive = true;
-            }
-        }
-        for (const id of this.activeShapes) {
-            if (!nowActive.has(id)) {
-                this.audio.noteOff(id);
-                const s = this.shapes.find(sh => sh.id === id);
-                if (s) s.isActive = false;
-            }
-        }
-        this.activeShapes = nowActive;
-    }
-
-    releaseAllTouch() {
-        if (this.state !== 'playing') return;
-        this.audio.noteOffAll();
-        this.shapes.forEach(s => s.isActive = false);
-        this.activeShapes.clear();
-    }
-
-    canvasPos(cx, cy) {
-        const r = this.overlay.getBoundingClientRect();
-        let x = (cx - r.left) * (this.overlay.width  / r.width);
-        const y = (cy - r.top)  * (this.overlay.height / r.height);
-        if (this.mirrored) x = this.overlay.width - x;
-        return { x, y };
-    }
-
-    /**
-     * Hit test — point-in-polygon, with bounding-rect pre-filter for speed.
-     */
-    shapeAt(x, y) {
-        const pt = { x, y };
-        return this.shapes.find(s => {
-            // Quick bounding-rect rejection
-            if (!ShapeDetector.pointInRect(pt, s.rect)) return false;
-            // Precise polygon test
-            return ShapeDetector.pointInPolygon(pt, s.polygon);
-        });
-    }
-
-    // ── Note editor modal ──────────────────────────────────────────────────────
-    openNoteEditor(shapeId) {
-        this._editingId = shapeId;
-        const container = document.getElementById('note-buttons');
-        container.innerHTML = '';
-
-        const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-        const shape = this.shapes.find(s => s.id === shapeId);
-
-        for (const n of notes) {
-            const btn = document.createElement('button');
-            btn.className = 'note-btn' + (shape?.note === n ? ' active' : '');
-            btn.textContent = n;
-            btn.addEventListener('click', () => {
-                if (shape) shape.note = n;
-                this.closeNoteEditor();
+                audio: false,
             });
-            container.appendChild(btn);
+            $video.srcObject = stream;
+            await $video.play();
+            $camDot.classList.add('ok');
+
+            // Match canvas to video native resolution
+            $overlay.width  = $video.videoWidth;
+            $overlay.height = $video.videoHeight;
+
+            /* ---- hand tracker ---- */
+            setLoading('Loading hand-tracking model… (may take a moment)');
+            await hands.init();
+            $handDot.classList.add('ok');
+
+            /* ---- OpenCV ---- */
+            setLoading('Loading OpenCV.js…');
+            await waitForOpenCV();
+            shapes.init($video.videoWidth, $video.videoHeight);
+            $cvDot.classList.add('ok');
+
+            /* ---- ready ---- */
+            $loadingOvr.classList.add('hidden');
+            $scanBtn.disabled = false;
+            running = true;
+            requestAnimationFrame(frame);
+        } catch (err) {
+            setLoading('Error: ' + err.message);
+            console.error(err);
+        }
+    }
+
+    /* ==============================================================
+       Main render loop
+       ============================================================== */
+    const octx = $overlay.getContext('2d');
+
+    function frame () {
+        if (!running) { requestAnimationFrame(frame); return; }
+
+        // Send frame to hand tracker (non-blocking)
+        if (hands.ready && !hands.processing) {
+            hands.send($video);
         }
 
-        document.getElementById('note-editor').classList.remove('hidden');
+        processInteraction();
+        draw();
+        updateFPS();
+
+        requestAnimationFrame(frame);
     }
 
-    closeNoteEditor() {
-        this._editingId = null;
-        document.getElementById('note-editor').classList.add('hidden');
+    /* ==============================================================
+       Interaction: finger → shape → sound
+       ============================================================== */
+    function processInteraction () {
+        const tips = hands.getFingerTips();
+        const cw   = $overlay.width;
+        const ch   = $overlay.height;
+        // Sensitivity → extra hit-area padding (0-30 px)
+        const pad  = (+$sensSlider.value / 100) * 30;
+
+        const pressed = notes.getPresses(tips, cw, ch, pad);
+        const curSet  = new Set(pressed.map(p => p.shape.id));
+
+        // Notes ON — newly pressed
+        for (const p of pressed) {
+            if (!prevPressed.has(p.shape.id)) {
+                audio.play(p.shape.id, p.shape.note, p.shape.instrument);
+                showNoteHUD(p.shape);
+            }
+        }
+
+        // Notes OFF — just released
+        for (const id of prevPressed) {
+            if (!curSet.has(id)) {
+                audio.stop(id);
+            }
+        }
+
+        prevPressed = curSet;
     }
 
-    // ── Render loop ────────────────────────────────────────────────────────────
-    startRenderLoop() {
-        const loop = (ts) => {
-            this.animId = requestAnimationFrame(loop);
-            this.update(ts);
-            this.draw(ts);
-            this.countFps(ts);
+    /* ==============================================================
+       Drawing overlay
+       ============================================================== */
+    function draw () {
+        const cw = $overlay.width;
+        const ch = $overlay.height;
+        octx.clearRect(0, 0, cw, ch);
+
+        // ---- draw paper outline ----
+        const paperPts = shapes.getPaperOutline();
+        if (paperPts && paperPts.length >= 3) {
+            octx.beginPath();
+            octx.moveTo(paperPts[0].x, paperPts[0].y);
+            for (let i = 1; i < paperPts.length; i++) {
+                octx.lineTo(paperPts[i].x, paperPts[i].y);
+            }
+            octx.closePath();
+            octx.strokeStyle = 'rgba(0,255,180,0.55)';
+            octx.lineWidth   = 2;
+            octx.setLineDash([8, 6]);
+            octx.stroke();
+            octx.setLineDash([]);
+        }
+
+        // ---- draw shapes ----
+        for (const s of notes.assignedShapes) {
+            const active   = prevPressed.has(s.id);
+            const editing  = editingShape && editingShape.id === s.id;
+
+            if (s.type === 'rectangle') {
+                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.strokeStyle = active ? '#FF5722'
+                    : editing ? '#FFD600'
+                    : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
+                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)'
+                    : editing ? 'rgba(255,214,0,0.18)'
+                    : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
+                octx.fillRect(s.x, s.y, s.width, s.height);
+                octx.strokeRect(s.x, s.y, s.width, s.height);
+            } else if (s.type === 'circle') {
+                octx.beginPath();
+                octx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
+                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.strokeStyle = active ? '#FF5722' : editing ? '#FFD600' : 'rgba(76,175,80,0.8)';
+                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
+                octx.fill();
+                octx.stroke();
+            }
+
+            // Note label
+            const tx = s.type === 'circle' ? s.centerX : s.x + s.width / 2;
+            const ty = s.type === 'circle' ? s.centerY : s.y + s.height / 2;
+            octx.font         = `bold ${active ? 22 : 17}px sans-serif`;
+            octx.textAlign    = 'center';
+            octx.textBaseline = 'middle';
+            octx.strokeStyle  = 'rgba(0,0,0,0.7)';
+            octx.lineWidth    = 3;
+            octx.strokeText(s.note, tx, ty);
+            octx.fillStyle    = active ? '#FFF' : '#e0e0ff';
+            octx.fillText(s.note, tx, ty);
+        }
+
+        // ---- draw fingertips ----
+        const tips = hands.getFingerTips();
+        for (const t of tips) {
+            const x = t.x * cw;
+            const y = t.y * ch;
+            octx.beginPath();
+            octx.arc(x, y, 9, 0, Math.PI * 2);
+            octx.fillStyle   = 'rgba(255,60,60,0.6)';
+            octx.fill();
+            octx.strokeStyle = '#fff';
+            octx.lineWidth   = 2;
+            octx.stroke();
+        }
+
+        // ---- debug: draw hand skeleton ----
+        if (showDebug && typeof drawConnectors !== 'undefined') {
+            const landmarks = hands.getLandmarks();
+            for (const lm of landmarks) {
+                // drawConnectors & drawLandmarks come from @mediapipe/drawing_utils
+                drawConnectors(octx, lm, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 1 });
+                drawLandmarks(octx, lm, { color: '#FF0000', lineWidth: 1, radius: 3 });
+            }
+        }
+    }
+
+    /* ==============================================================
+       Shape scanning
+       ============================================================== */
+    function scanShapes () {
+        const oct    = +$octaveSlider.value;
+        // Always pass debug canvas so we can inspect threshold if needed
+        const dbgCvs = showDebug ? $debugCanvas : null;
+
+        console.log('[Scan] scanning shapes… octave=' + oct);
+        const raw    = shapes.detect($video, dbgCvs);
+        const assigned = notes.assignNotes(raw, oct);
+
+        const nKeys = assigned.filter(s => s.type === 'rectangle').length;
+        const nPads = assigned.filter(s => s.type === 'circle').length;
+
+        $keyCount.textContent = nKeys;
+        $padCount.textContent = nPads;
+        $shapeBadge.classList.toggle('hidden', nKeys + nPads === 0);
+
+        // Always update debug info (visible when debug panel open)
+        const strategyLog = shapes.lastLog || '(no strategies ran)';
+        $debugInfo.textContent =
+            `Strategies: ${strategyLog}\n` +
+            `Result → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}\n` +
+            assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})`).join('\n');
+
+        if (nKeys + nPads === 0) {
+            console.warn('[Scan] No shapes found. Tips: use a thick dark marker on white paper, ensure good lighting, hold camera steady.');
+        }
+
+        console.log('[Scan] paper detected:', !!shapes.paperContour);
+    }
+
+    /* ==============================================================
+       UI wiring
+       ============================================================== */
+    $scanBtn.addEventListener('click', scanShapes);
+
+    $autoScanBtn.addEventListener('click', () => {
+        autoScan = !autoScan;
+        $autoScanBtn.textContent = autoScan ? '🔄 Auto: ON' : '🔄 Auto: OFF';
+        $autoScanBtn.classList.toggle('active', autoScan);
+        if (autoScan) {
+            autoScanTimer = setInterval(scanShapes, 2500);
+        } else {
+            clearInterval(autoScanTimer);
+        }
+    });
+
+    $mirrorBtn.addEventListener('click', () => {
+        mirrored = !mirrored;
+        $video.classList.toggle('mirrored', mirrored);
+        $overlay.classList.toggle('mirrored', mirrored);
+    });
+
+    $octaveSlider.addEventListener('input', () => {
+        $octaveVal.textContent = $octaveSlider.value;
+        // Re-assign notes at new octave if shapes already detected
+        if (notes.assignedShapes.length) scanShapes();
+    });
+
+    $debugBtn.addEventListener('click', () => {
+        showDebug = !showDebug;
+        $debugPanel.classList.toggle('hidden', !showDebug);
+        $debugBtn.classList.toggle('active', showDebug);
+    });
+
+    /* ==============================================================
+       Shape Editor — click a shape on the overlay to change its sound
+       ============================================================== */
+    const $shapeEditor  = document.getElementById('shapeEditor');
+    const $editorTitle  = document.getElementById('editorTitle');
+    const $editorBody   = document.getElementById('editorBody');
+    const $editorClose  = document.getElementById('editorClose');
+
+    let editingShape    = null;  // reference into notes.assignedShapes
+
+    // All chromatic notes across one octave
+    const ALL_NOTES     = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const DRUM_OPTIONS  = ['kick','snare','hihat','tom1','tom2','crash'];
+
+    /** Convert overlay-canvas click to video-pixel coordinates. */
+    function overlayClickToVideoPx (e) {
+        const rect = $overlay.getBoundingClientRect();
+        const scaleX = $overlay.width  / rect.width;
+        const scaleY = $overlay.height / rect.height;
+        return {
+            x: (e.clientX - rect.left) * scaleX,
+            y: (e.clientY - rect.top)  * scaleY,
         };
-        this.animId = requestAnimationFrame(loop);
     }
 
-    // ── Update (hand tracking + polygon collision) ────────────────────────────
-    update(ts) {
-        if (this.state !== 'playing' || !this.hands.ready) return;
+    /** Hit-test a click against assigned shapes (same priority rules as finger presses). */
+    function hitTestShapes (px, py) {
+        const hits = notes.assignedShapes.filter(s => {
+            if (s.type === 'rectangle') {
+                return px >= s.x && px <= s.x + s.width &&
+                       py >= s.y && py <= s.y + s.height;
+            } else if (s.type === 'circle') {
+                return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius;
+            }
+            return false;
+        });
+        if (hits.length === 0) return null;
+        hits.sort((a, b) => {
+            if (a.priority !== b.priority) return b.priority - a.priority;
+            return a.area - b.area;
+        });
+        return hits[0];
+    }
 
-        const res = this.hands.detect(this.video, ts);
-        this.lastHandRes = res;
-        if (!res) return;
+    /** Open the editor popup anchored near the click position. */
+    function openEditor (shape, clickEvt) {
+        editingShape = shape;
+        $shapeEditor.classList.remove('hidden');
 
-        const fingers = this.hands.getFingerTips(res, this.overlay.width, this.overlay.height);
-        const nowActive = new Set();
+        // Position: near the click, but keep inside the camera container
+        const container = document.getElementById('cameraContainer');
+        const cRect     = container.getBoundingClientRect();
+        let left = clickEvt.clientX - cRect.left + 12;
+        let top  = clickEvt.clientY - cRect.top  + 12;
 
-        for (const hand of fingers) {
-            for (const tip of hand.tips) {
-                const shape = this.shapeAt(tip.x, tip.y);
-                if (shape) {
-                    nowActive.add(shape.id);
-                    if (!this.activeShapes.has(shape.id)) {
-                        this.audio.noteOn(shape.id, shape.note);
-                    }
+        // Clamp so popup doesn't overflow
+        const edW = 260, edH = 240;
+        if (left + edW > cRect.width)  left = cRect.width  - edW - 8;
+        if (top  + edH > cRect.height) top  = cRect.height - edH - 8;
+        if (left < 4) left = 4;
+        if (top  < 4) top  = 4;
+
+        $shapeEditor.style.left = left + 'px';
+        $shapeEditor.style.top  = top  + 'px';
+
+        // Build content based on instrument type
+        if (shape.instrument === 'piano') {
+            buildPianoEditor(shape);
+        } else {
+            buildDrumEditor(shape);
+        }
+    }
+
+    function closeEditor () {
+        $shapeEditor.classList.add('hidden');
+        editingShape = null;
+    }
+
+    $editorClose.addEventListener('click', closeEditor);
+
+    // Close when clicking outside
+    document.addEventListener('mousedown', (e) => {
+        if (editingShape && !$shapeEditor.contains(e.target) && e.target !== $overlay) {
+            closeEditor();
+        }
+    });
+
+    /** Build a piano-note picker (chromatic, with octave selector). */
+    function buildPianoEditor (shape) {
+        // Parse current note & octave
+        const curBase = shape.note.replace(/\d+$/, '');
+        const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+
+        $editorTitle.textContent = '🎹 Piano Key — ' + shape.id;
+
+        let html = '';
+
+        // Octave row
+        html += '<div class="editor-section-label">Octave</div>';
+        html += '<div class="editor-grid">';
+        for (let o = 2; o <= 6; o++) {
+            const sel = o === curOct ? ' selected' : '';
+            html += `<button class="note-btn${sel}" data-action="set-octave" data-oct="${o}">${o}</button>`;
+        }
+        html += '</div>';
+
+        // Note row
+        html += '<div class="editor-section-label">Note</div>';
+        html += '<div class="editor-grid">';
+        for (const n of ALL_NOTES) {
+            const sel   = n === curBase ? ' selected' : '';
+            const sharp = n.includes('#') ? ' sharp' : '';
+            html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
+        }
+        html += '</div>';
+
+        $editorBody.innerHTML = html;
+
+        // Bind clicks
+        $editorBody.querySelectorAll('[data-action]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.action;
+                if (action === 'set-note') {
+                    const newBase = btn.dataset.note;
+                    const oct = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+                    shape.note = newBase + oct;
+                    // Preview the sound
+                    audio.play('__preview', shape.note, 'piano');
+                    setTimeout(() => audio.stop('__preview'), 300);
+                    buildPianoEditor(shape); // refresh selection
+                } else if (action === 'set-octave') {
+                    const base = shape.note.replace(/\d+$/, '');
+                    shape.note = base + btn.dataset.oct;
+                    audio.play('__preview', shape.note, 'piano');
+                    setTimeout(() => audio.stop('__preview'), 300);
+                    buildPianoEditor(shape);
                 }
-            }
-        }
-
-        for (const id of this.activeShapes) {
-            if (!nowActive.has(id)) {
-                this.audio.noteOff(id);
-            }
-        }
-
-        this.shapes.forEach(s => { s.isActive = nowActive.has(s.id); });
-        this.activeShapes = nowActive;
+            });
+        });
     }
 
-    // ── Draw (contour-based rendering) ─────────────────────────────────────────
-    draw() {
-        const ctx = this.octx;
-        const W   = this.overlay.width;
-        const H   = this.overlay.height;
+    /** Build a drum-type picker. */
+    function buildDrumEditor (shape) {
+        $editorTitle.textContent = '🥁 Drum Pad — ' + shape.id;
 
-        ctx.clearRect(0, 0, W, H);
-
-        // Mirror for front-facing cameras
-        ctx.save();
-        if (this.mirrored) {
-            ctx.translate(W, 0);
-            ctx.scale(-1, 1);
+        let html = '<div class="editor-section-label">Drum Sound</div>';
+        html += '<div class="editor-grid">';
+        for (const d of DRUM_OPTIONS) {
+            const sel = d === shape.note ? ' selected' : '';
+            html += `<button class="note-btn drum-btn${sel}" data-drum="${d}">${d}</button>`;
         }
+        html += '</div>';
 
-        // Video background
-        ctx.drawImage(this.video, 0, 0, W, H);
+        $editorBody.innerHTML = html;
 
-        // ─ Draw shapes as filled/stroked polygons ──────────────────────────
-        for (const s of this.shapes) {
-            const { polygon, note, isActive, color, rect, textPos } = s;
+        $editorBody.querySelectorAll('[data-drum]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                shape.note = btn.dataset.drum;
+                // Preview
+                audio.play('__preview_d', shape.note, 'drums');
+                buildDrumEditor(shape); // refresh selection
+            });
+        });
+    }
 
-            if (polygon && polygon.length >= 3) {
-                // ── Filled polygon ─────────────────────────────────────────
-                ctx.beginPath();
-                ctx.moveTo(polygon[0].x, polygon[0].y);
-                for (let i = 1; i < polygon.length; i++) {
-                    ctx.lineTo(polygon[i].x, polygon[i].y);
+    /** Handle clicks on the overlay canvas. */
+    $overlay.addEventListener('click', (e) => {
+        // Ignore if no shapes assigned yet
+        if (notes.assignedShapes.length === 0) return;
+
+        const { x, y } = overlayClickToVideoPx(e);
+        const shape = hitTestShapes(x, y);
+
+        if (shape) {
+            openEditor(shape, e);
+        } else {
+            closeEditor();
+        }
+    });
+
+    /* ==============================================================
+       HUD (floating note names on play)
+       ============================================================== */
+    function showNoteHUD (shape) {
+        // Remove old bubble for this id if it exists
+        if (activeHUD.has(shape.id)) {
+            clearTimeout(activeHUD.get(shape.id).timer);
+            activeHUD.get(shape.id).el.remove();
+        }
+        const el = document.createElement('div');
+        el.className = 'note-bubble' + (shape.instrument === 'drums' ? ' drum' : '');
+        el.textContent = shape.note;
+        $noteHUD.appendChild(el);
+        const timer = setTimeout(() => { el.remove(); activeHUD.delete(shape.id); }, 600);
+        activeHUD.set(shape.id, { el, timer });
+    }
+
+    /* ==============================================================
+       Helpers
+       ============================================================== */
+    function setLoading (msg) {
+        $loadingTxt.textContent = msg;
+    }
+
+    function waitForOpenCV () {
+        return new Promise((resolve) => {
+            console.log('[OpenCV] waiting for cv to load…');
+
+            // Check if already fully loaded
+            if (typeof cv !== 'undefined' && typeof cv.Mat === 'function') {
+                console.log('[OpenCV] already loaded');
+                resolve();
+                return;
+            }
+
+            const timeout = setTimeout(() => {
+                clearInterval(poll);
+                console.warn('[OpenCV] timed out after 45s — shape detection will be unavailable');
+                $cvDot.classList.add('warn');
+                resolve();
+            }, 45000);
+
+            function onReady () {
+                clearInterval(poll);
+                clearTimeout(timeout);
+                console.log('[OpenCV] runtime ready — cv.Mat exists:', typeof cv.Mat === 'function');
+                resolve();
+            }
+
+            const poll = setInterval(() => {
+                if (typeof cv === 'undefined') return;
+
+                // New builds: cv might be a function / promise-like
+                if (typeof cv === 'function') {
+                    clearInterval(poll);
+                    console.log('[OpenCV] cv is a function — calling cv() to init');
+                    cv().then(module => {
+                        // Some builds replace global cv, some return a module
+                        if (module) window.cv = module;
+                        clearTimeout(timeout);
+                        console.log('[OpenCV] initialized via cv()');
+                        resolve();
+                    }).catch(e => {
+                        console.error('[OpenCV] init error:', e);
+                        clearTimeout(timeout);
+                        $cvDot.classList.add('warn');
+                        resolve();
+                    });
+                    return;
                 }
-                ctx.closePath();
 
-                ctx.fillStyle = isActive ? (color + 'AA') : (color + '40');
-                ctx.fill();
-
-                // ── Stroked polygon border ─────────────────────────────────
-                ctx.save();
-                if (isActive) {
-                    ctx.shadowColor = color;
-                    ctx.shadowBlur  = 22;
-                }
-                ctx.strokeStyle = isActive ? '#FFF' : color;
-                ctx.lineWidth   = isActive ? 3 : 2;
-                ctx.stroke();
-                ctx.restore();
-            } else {
-                // Fallback to rect if no polygon
-                ctx.fillStyle = isActive ? (color + 'AA') : (color + '40');
-                ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-                ctx.save();
-                if (isActive) { ctx.shadowColor = color; ctx.shadowBlur = 22; }
-                ctx.strokeStyle = isActive ? '#FFF' : color;
-                ctx.lineWidth   = isActive ? 3 : 2;
-                ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-                ctx.restore();
-            }
-
-            // ── Note label — un-mirror text ────────────────────────────────
-            const cx = rect.x + rect.width  / 2;
-            const cy = rect.y + rect.height / 2;
-            const fz = Math.max(14, Math.min(rect.width, rect.height) * 0.45);
-            ctx.font         = `bold ${fz}px "Segoe UI", Arial, sans-serif`;
-            ctx.textAlign    = 'center';
-            ctx.textBaseline = 'middle';
-
-            ctx.save();
-            if (this.mirrored) {
-                ctx.translate(cx, cy);
-                ctx.scale(-1, 1);
-                ctx.translate(-cx, -cy);
-            }
-            ctx.fillStyle = '#000';
-            ctx.fillText(note, cx + 1, cy + 1);
-            ctx.fillStyle = isActive ? '#FFF' : '#EEE';
-            ctx.fillText(note, cx, cy);
-            ctx.restore();
-
-            // ── Debug: text anchor dot ──────────────────────────────────────
-            if (textPos) {
-                ctx.beginPath();
-                ctx.arc(textPos.x, textPos.y, 4, 0, Math.PI * 2);
-                ctx.fillStyle = '#FF0';
-                ctx.fill();
-                ctx.strokeStyle = '#000';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-            }
-        }
-
-        // ─ Hand skeleton ───────────────────────────────────────────────────
-        if (this.state === 'playing' && this.lastHandRes?.landmarks) {
-            for (const rawHand of this.lastHandRes.landmarks) {
-                const lm = rawHand.map(p => ({ x: p.x * W, y: p.y * H }));
-
-                ctx.strokeStyle = 'rgba(0,255,136,0.35)';
-                ctx.lineWidth   = 1.5;
-                for (const [a, b] of HAND_CONNECTIONS) {
-                    ctx.beginPath();
-                    ctx.moveTo(lm[a].x, lm[a].y);
-                    ctx.lineTo(lm[b].x, lm[b].y);
-                    ctx.stroke();
+                // cv exists as an object
+                if (typeof cv.Mat === 'function') {
+                    onReady();
+                    return;
                 }
 
-                const TIP_IDS = [4, 8, 12, 16, 20];
-                for (const ti of TIP_IDS) {
-                    const r = ti === 8 ? 8 : 5;
-                    ctx.beginPath();
-                    ctx.arc(lm[ti].x, lm[ti].y, r, 0, Math.PI * 2);
-                    ctx.fillStyle   = ti === 8 ? '#00FF88' : 'rgba(0,255,136,0.5)';
-                    ctx.fill();
-                    ctx.strokeStyle = '#FFF';
-                    ctx.lineWidth   = 1.5;
-                    ctx.stroke();
+                // cv exists but isn't ready yet — try setting onRuntimeInitialized
+                if (typeof cv.onRuntimeInitialized === 'undefined' ||
+                    cv.onRuntimeInitialized === null) {
+                    cv.onRuntimeInitialized = onReady;
                 }
-            }
-        }
-
-        ctx.restore();   // close mirrored context
+            }, 300);
+        });
     }
 
-    // ── FPS counter ────────────────────────────────────────────────────────────
-    countFps(ts) {
-        this._fpsFrames++;
-        if (ts - this._fpsLast >= 1000) {
-            this.fps = this._fpsFrames;
-            this._fpsFrames = 0;
-            this._fpsLast   = ts;
-            document.getElementById('fps-counter').textContent = `${this.fps} FPS`;
+    function updateFPS () {
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+            $fpsEl.textContent = frameCount + ' fps';
+            frameCount = 0;
+            lastFpsTime = now;
         }
     }
 
-    // ── UI helpers ─────────────────────────────────────────────────────────────
-    status(msg) {
-        document.getElementById('status-text').textContent = msg;
-        const ls = document.getElementById('loading-status');
-        if (ls) ls.textContent = msg;
-    }
-
-    hideLoading() {
-        document.getElementById('loading-screen').classList.add('hidden');
-        document.getElementById('main-interface').classList.remove('hidden');
-    }
-
-    showError(msg) {
-        this.status(msg);
-        const p = document.querySelector('#loading-screen p');
-        if (p) { p.textContent = msg; p.style.color = '#ff5555'; }
-    }
-}
-
-// ── Launch ─────────────────────────────────────────────────────────────────────
-const app = new PaperPianoApp();
-app.init().catch(err => {
-    console.error('PaperPiano fatal error:', err);
-    document.getElementById('loading-status').textContent = 'Fatal: ' + err.message;
-});
+})();

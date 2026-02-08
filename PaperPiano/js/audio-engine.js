@@ -1,184 +1,239 @@
-/**
- * AudioEngine - Web Audio API synthesis for musical notes.
- * Uses multiple oscillators with ADSR envelope for rich, low-latency sound.
- */
+/* =========================================================
+   AudioEngine — Web Audio API synthesizer for piano & drums
+   ========================================================= */
+'use strict';
 
-const NOTE_FREQUENCIES = {
-    'C': 261.63, 'C#': 277.18, 'Db': 277.18,
-    'D': 293.66, 'D#': 311.13, 'Eb': 311.13,
-    'E': 329.63,
-    'F': 349.23, 'F#': 369.99, 'Gb': 369.99,
-    'G': 392.00, 'G#': 415.30, 'Ab': 415.30,
-    'A': 440.00, 'A#': 466.16, 'Bb': 466.16,
-    'B': 493.88
-};
-
-// Waveform presets for different instruments
-const PRESETS = {
-    piano: {
-        oscillators: [
-            { type: 'triangle', detune: 0, gain: 0.35 },
-            { type: 'sine', freqMul: 2, gain: 0.08 },
-            { type: 'sine', freqMul: 0.5, gain: 0.04 }
-        ],
-        attack: 0.008,
-        decay: 0.25,
-        sustain: 0.15,
-        release: 0.2
-    },
-    organ: {
-        oscillators: [
-            { type: 'sine', detune: 0, gain: 0.25 },
-            { type: 'sine', freqMul: 2, gain: 0.15 },
-            { type: 'sine', freqMul: 3, gain: 0.08 },
-            { type: 'sine', freqMul: 4, gain: 0.04 }
-        ],
-        attack: 0.05,
-        decay: 0.1,
-        sustain: 0.3,
-        release: 0.1
-    },
-    synth: {
-        oscillators: [
-            { type: 'sawtooth', detune: 0, gain: 0.2 },
-            { type: 'sawtooth', detune: 7, gain: 0.15 },
-            { type: 'square', freqMul: 0.5, gain: 0.05 }
-        ],
-        attack: 0.005,
-        decay: 0.15,
-        sustain: 0.25,
-        release: 0.3
-    }
-};
-
-export class AudioEngine {
-    constructor() {
-        this.ctx = null;
-        this.masterGain = null;
-        this.compressor = null;
-        this.activeNotes = new Map();
-        this.preset = 'piano';
+class AudioEngine {
+    constructor () {
+        /** @type {AudioContext|null} */
+        this.ctx          = null;
+        this.masterGain   = null;
+        this.compressor   = null;
+        this.initialized  = false;
+        /** Map<shapeId, {stop:Function}> */
+        this.activeNotes  = new Map();
+        /** Pre-computed note → frequency table */
+        this.freq         = {};
+        this._buildFrequencyTable();
     }
 
-    init() {
-        if (this.ctx) return;
-        this.ctx = new (window.AudioContext || window.webkitAudioContext)({
-            latencyHint: 'interactive',
-            sampleRate: 44100
-        });
+    /* ---------- public ---------- */
 
-        // Dynamics compressor prevents clipping with many simultaneous notes
+    /** Must be called from a user-gesture handler (click / tap). */
+    init () {
+        if (this.initialized) return;
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+        // Compressor → prevents clipping when many notes play at once
         this.compressor = this.ctx.createDynamicsCompressor();
-        this.compressor.threshold.value = -20;
-        this.compressor.knee.value = 20;
-        this.compressor.ratio.value = 8;
-        this.compressor.attack.value = 0.002;
-        this.compressor.release.value = 0.15;
+        this.compressor.threshold.setValueAtTime(-18, this.ctx.currentTime);
+        this.compressor.knee.setValueAtTime(30, this.ctx.currentTime);
+        this.compressor.ratio.setValueAtTime(12, this.ctx.currentTime);
+        this.compressor.attack.setValueAtTime(0.003, this.ctx.currentTime);
+        this.compressor.release.setValueAtTime(0.15, this.ctx.currentTime);
 
+        // Master gain
         this.masterGain = this.ctx.createGain();
-        this.masterGain.gain.value = 0.6;
+        this.masterGain.gain.value = 0.75;
 
         this.compressor.connect(this.masterGain);
         this.masterGain.connect(this.ctx.destination);
+
+        this.initialized = true;
     }
 
-    resume() {
-        if (this.ctx?.state === 'suspended') {
-            this.ctx.resume();
+    /** Resume context if it was suspended (autoplay policy). */
+    async resume () {
+        if (this.ctx && this.ctx.state === 'suspended') {
+            await this.ctx.resume();
         }
     }
 
-    setPreset(name) {
-        if (PRESETS[name]) this.preset = name;
-    }
-
     /**
-     * Start playing a note for a given shape.
-     * If the shape is already playing, this is a no-op (prevents re-triggering).
+     * Trigger a note.
+     * @param {string} id       – unique shape id
+     * @param {string} note     – e.g. 'C4', 'kick', 'snare'
+     * @param {string} instrument – 'piano' | 'drums'
      */
-    noteOn(shapeId, noteName) {
-        if (!this.ctx) this.init();
+    play (id, note, instrument) {
+        if (!this.initialized) return;
+        if (this.activeNotes.has(id)) return; // already sounding
         this.resume();
 
-        if (this.activeNotes.has(shapeId)) return;
-
-        const freq = this.getFrequency(noteName);
-        if (!freq) return;
-
-        const preset = PRESETS[this.preset];
-        const now = this.ctx.currentTime;
-        const nodes = [];
-
-        for (const oscDef of preset.oscillators) {
-            const osc = this.ctx.createOscillator();
-            osc.type = oscDef.type;
-
-            const oscFreq = oscDef.freqMul ? freq * oscDef.freqMul : freq;
-            osc.frequency.setValueAtTime(oscFreq, now);
-            if (oscDef.detune) osc.detune.setValueAtTime(oscDef.detune, now);
-
-            const gain = this.ctx.createGain();
-            gain.gain.setValueAtTime(0, now);
-            // Attack
-            gain.gain.linearRampToValueAtTime(oscDef.gain, now + preset.attack);
-            // Decay to sustain
-            gain.gain.exponentialRampToValueAtTime(
-                Math.max(oscDef.gain * (preset.sustain / 0.35), 0.001),
-                now + preset.attack + preset.decay
-            );
-
-            osc.connect(gain);
-            gain.connect(this.compressor);
-            osc.start(now);
-
-            nodes.push({ osc, gain });
-        }
-
-        this.activeNotes.set(shapeId, { nodes, preset });
+        if (instrument === 'piano') this._pianoOn(id, note);
+        else if (instrument === 'drums') this._drumHit(id, note);
     }
 
-    /**
-     * Stop a note for a given shape with a smooth release.
-     */
-    noteOff(shapeId) {
-        const entry = this.activeNotes.get(shapeId);
+    /** Release a sustained note. */
+    stop (id) {
+        if (!this.initialized) return;
+        const entry = this.activeNotes.get(id);
         if (!entry) return;
-
-        const now = this.ctx.currentTime;
-        const release = entry.preset.release;
-
-        for (const { osc, gain } of entry.nodes) {
-            gain.gain.cancelScheduledValues(now);
-            gain.gain.setValueAtTime(gain.gain.value, now);
-            gain.gain.linearRampToValueAtTime(0.001, now + release);
-            osc.stop(now + release + 0.02);
-        }
-
-        this.activeNotes.delete(shapeId);
+        entry.stop();
+        this.activeNotes.delete(id);
     }
 
-    noteOffAll() {
-        for (const id of [...this.activeNotes.keys()]) {
-            this.noteOff(id);
-        }
+    /** Release every sounding note. */
+    stopAll () {
+        for (const [id] of this.activeNotes) this.stop(id);
     }
 
-    getFrequency(noteName) {
-        if (!noteName) return null;
-        const name = noteName.trim();
+    /* ---------- piano ---------- */
 
-        if (NOTE_FREQUENCIES[name]) return NOTE_FREQUENCIES[name];
+    _pianoOn (id, noteName) {
+        const f = this.freq[noteName];
+        if (!f) return;
 
-        // Try uppercase
-        const upper = name.toUpperCase();
-        for (const [key, val] of Object.entries(NOTE_FREQUENCIES)) {
-            if (key.toUpperCase() === upper) return val;
+        const t  = this.ctx.currentTime;
+        const out = this.compressor;
+
+        // Envelope gain node
+        const env = this.ctx.createGain();
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(0.55, t + 0.008);    // attack
+        env.gain.exponentialRampToValueAtTime(0.30, t + 0.18); // decay → sustain
+        env.connect(out);
+
+        // Harmonics: fundamental + 2nd + 3rd + soft 5th partial
+        const partials = [
+            { type: 'triangle', detune:  0, gain: 0.50 },
+            { type: 'sine',     detune:  0, gain: 0.18, ratio: 2 },
+            { type: 'sine',     detune:  0, gain: 0.06, ratio: 3 },
+            { type: 'sine',     detune: -5, gain: 0.03, ratio: 5 },
+        ];
+
+        const oscs = partials.map(p => {
+            const o = this.ctx.createOscillator();
+            o.type = p.type;
+            o.frequency.value = f * (p.ratio || 1);
+            o.detune.value = p.detune;
+            const g = this.ctx.createGain();
+            g.gain.value = p.gain;
+            o.connect(g).connect(env);
+            o.start(t);
+            return o;
+        });
+
+        this.activeNotes.set(id, {
+            stop: () => {
+                const now = this.ctx.currentTime;
+                env.gain.cancelScheduledValues(now);
+                env.gain.setValueAtTime(env.gain.value, now);
+                env.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+                oscs.forEach(o => o.stop(now + 0.15));
+            }
+        });
+    }
+
+    /* ---------- drums ---------- */
+
+    _drumHit (id, type) {
+        const t = this.ctx.currentTime;
+        switch (type) {
+            case 'kick':   this._kick(t);   break;
+            case 'snare':  this._snare(t);  break;
+            case 'hihat':  this._hihat(t);  break;
+            case 'tom1':   this._tom(t, 160); break;
+            case 'tom2':   this._tom(t, 110); break;
+            case 'crash':  this._crash(t);  break;
+            default:       this._kick(t);   break;
         }
+        // Drums are one-shot; stop is a no-op.  Remove after sound ends.
+        this.activeNotes.set(id, { stop: () => {} });
+        setTimeout(() => this.activeNotes.delete(id), 600);
+    }
 
-        // Try just the first letter
-        const letter = upper.charAt(0);
-        if (NOTE_FREQUENCIES[letter]) return NOTE_FREQUENCIES[letter];
+    _kick (t) {
+        const osc  = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain).connect(this.compressor);
+        osc.frequency.setValueAtTime(150, t);
+        osc.frequency.exponentialRampToValueAtTime(35, t + 0.12);
+        gain.gain.setValueAtTime(1, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+        osc.start(t); osc.stop(t + 0.35);
+    }
 
-        return null;
+    _snare (t) {
+        // Noise burst
+        const buf   = this._noiseBuffer(0.18);
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buf;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass'; hp.frequency.value = 1200;
+        const ng = this.ctx.createGain();
+        ng.gain.setValueAtTime(0.75, t);
+        ng.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+        noise.connect(hp).connect(ng).connect(this.compressor);
+        noise.start(t); noise.stop(t + 0.18);
+
+        // Body tone
+        const osc = this.ctx.createOscillator();
+        osc.type = 'triangle'; osc.frequency.value = 180;
+        const og = this.ctx.createGain();
+        og.gain.setValueAtTime(0.6, t);
+        og.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+        osc.connect(og).connect(this.compressor);
+        osc.start(t); osc.stop(t + 0.08);
+    }
+
+    _hihat (t) {
+        const buf   = this._noiseBuffer(0.06);
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buf;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = 'highpass'; hp.frequency.value = 7500;
+        const g  = this.ctx.createGain();
+        g.gain.setValueAtTime(0.45, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+        noise.connect(hp).connect(g).connect(this.compressor);
+        noise.start(t); noise.stop(t + 0.06);
+    }
+
+    _tom (t, freq) {
+        const osc  = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain).connect(this.compressor);
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 0.45, t + 0.18);
+        gain.gain.setValueAtTime(0.75, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+        osc.start(t); osc.stop(t + 0.28);
+    }
+
+    _crash (t) {
+        const buf   = this._noiseBuffer(0.55);
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buf;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = 5500; bp.Q.value = 0.6;
+        const g  = this.ctx.createGain();
+        g.gain.setValueAtTime(0.55, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.50);
+        noise.connect(bp).connect(g).connect(this.compressor);
+        noise.start(t); noise.stop(t + 0.55);
+    }
+
+    /* ---------- helpers ---------- */
+
+    _noiseBuffer (seconds) {
+        const len = this.ctx.sampleRate * seconds;
+        const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+        const d   = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+        return buf;
+    }
+
+    _buildFrequencyTable () {
+        const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+        for (let oct = 0; oct <= 8; oct++) {
+            names.forEach((n, i) => {
+                const midi = (oct + 1) * 12 + i;          // C4 = MIDI 60
+                this.freq[n + oct] = 440 * Math.pow(2, (midi - 69) / 12);
+            });
+        }
     }
 }
+
+// Expose globally (no-build setup)
+window.AudioEngine = AudioEngine;
