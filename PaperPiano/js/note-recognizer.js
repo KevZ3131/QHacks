@@ -26,23 +26,34 @@ export class NoteRecognizer {
                 return;
             }
 
-            this.worker = await Tesseract.createWorker('eng', 1, {
-                logger: m => {
-                    if (m.status === 'loading tesseract core' || m.status === 'initializing tesseract') {
-                        if (onProgress) onProgress(`OCR: ${m.status}`);
+            // Wrap Tesseract init with a timeout to prevent blocking on slow mobile connections
+            const timeoutMs = 5000;
+            const initPromise = (async () => {
+                this.worker = await Tesseract.createWorker('eng', 1, {
+                    logger: m => {
+                        if (m.status === 'loading tesseract core' || m.status === 'initializing tesseract') {
+                            if (onProgress) onProgress(`OCR: ${m.status}`);
+                        }
                     }
-                }
-            });
+                });
 
-            await this.worker.setParameters({
-                tessedit_char_whitelist: 'ABCDEFGabcdefg#',
-                tessedit_pageseg_mode: '8'   // PSM.SINGLE_WORD
-            });
+                await this.worker.setParameters({
+                    tessedit_char_whitelist: 'ABCDEFGabcdefg#',
+                    tessedit_pageseg_mode: '8'   // PSM.SINGLE_WORD
+                });
+            })();
+
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('OCR init timed out')), timeoutMs)
+            );
+
+            await Promise.race([initPromise, timeoutPromise]);
 
             this.ready = true;
             if (onProgress) onProgress('OCR ready ✓');
         } catch (err) {
             console.warn('NoteRecognizer init failed (OCR optional):', err);
+            if (onProgress) onProgress('OCR skipped (slow connection)');
         }
     }
 

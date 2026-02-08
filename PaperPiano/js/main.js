@@ -14,10 +14,10 @@
  *   - MediaPipe fails → touch / click to play
  */
 
-import { AudioEngine }    from './audio-engine.js';
-import { ShapeDetector }  from './shape-detector.js';
+import { AudioEngine } from './audio-engine.js';
+import { ShapeDetector } from './shape-detector.js';
 import { NoteRecognizer } from './note-recognizer.js';
-import { HandTracker }    from './hand-tracker.js';
+import { HandTracker } from './hand-tracker.js';
 
 // ── Shape colours ──────────────────────────────────────────────────────────────
 const SHAPE_COLORS = [
@@ -28,34 +28,34 @@ const SHAPE_COLORS = [
 
 // ── Hand-skeleton connections for drawing ──────────────────────────────────────
 const HAND_CONNECTIONS = [
-    [0,1],[1,2],[2,3],[3,4],           // thumb
-    [0,5],[5,6],[6,7],[7,8],           // index
-    [5,9],[9,10],[10,11],[11,12],      // middle
-    [9,13],[13,14],[14,15],[15,16],    // ring
-    [13,17],[17,18],[18,19],[19,20],   // pinky
-    [0,17]                              // palm base
+    [0, 1], [1, 2], [2, 3], [3, 4],           // thumb
+    [0, 5], [5, 6], [6, 7], [7, 8],           // index
+    [5, 9], [9, 10], [10, 11], [11, 12],      // middle
+    [9, 13], [13, 14], [14, 15], [15, 16],    // ring
+    [13, 17], [17, 18], [18, 19], [19, 20],   // pinky
+    [0, 17]                              // palm base
 ];
 
 class PaperPianoApp {
     constructor() {
         // Modules
-        this.audio     = new AudioEngine();
-        this.shapes_   = new ShapeDetector();
-        this.ocr       = new NoteRecognizer();
-        this.hands     = new HandTracker();
+        this.audio = new AudioEngine();
+        this.shapes_ = new ShapeDetector();
+        this.ocr = new NoteRecognizer();
+        this.hands = new HandTracker();
 
         // State
-        this.shapes       = [];          // detected / manually added shapes
+        this.shapes = [];          // detected / manually added shapes
         this.activeShapes = new Set();   // currently pressed shape IDs
-        this.state        = 'loading';   // loading | ready | scanning | playing
-        this.lastHandRes  = null;
-        this.animId       = null;
-        this.mirrored     = false;       // true when using front-facing camera
+        this.state = 'loading';   // loading | ready | scanning | playing
+        this.lastHandRes = null;
+        this.animId = null;
+        this.mirrored = false;       // true when using front-facing camera
 
         // FPS counter
         this._fpsFrames = 0;
-        this._fpsLast   = 0;
-        this.fps        = 0;
+        this._fpsLast = 0;
+        this.fps = 0;
 
         // DOM refs (bound in bindElements)
         this.video = null;
@@ -85,7 +85,7 @@ class PaperPianoApp {
         }
 
         // Log which optional modules failed
-        if (ocv.status === 'rejected')   console.warn('OpenCV unavailable:', ocv.reason);
+        if (ocv.status === 'rejected') console.warn('OpenCV unavailable:', ocv.reason);
         if (ocrRes.status === 'rejected') console.warn('OCR unavailable:', ocrRes.reason);
         if (handsRes.status === 'rejected') console.warn('Hand tracking unavailable:', handsRes.reason);
 
@@ -93,45 +93,63 @@ class PaperPianoApp {
         this.state = 'ready';
         this.status(
             this.shapes_.ready
-                ? 'Ready — point camera at drawn shapes, then press Scan.'
-                : 'OpenCV unavailable — use "Demo Shapes" to start.'
+                ? 'Ready — point at paper and tap Scan.'
+                : 'OpenCV unavailable — try Demo instead.'
         );
         this.startRenderLoop();
     }
 
     // ── DOM binding ────────────────────────────────────────────────────────────
     bindElements() {
-        this.video   = document.getElementById('video');
+        this.video = document.getElementById('video');
         this.overlay = document.getElementById('overlay-canvas');
-        this.octx    = this.overlay.getContext('2d');
-        this.proc    = document.getElementById('processing-canvas');
-        this.pctx    = this.proc.getContext('2d');
+        this.octx = this.overlay.getContext('2d');
+        this.proc = document.getElementById('processing-canvas');
+        this.pctx = this.proc.getContext('2d');
     }
 
     bindEvents() {
         const $ = id => document.getElementById(id);
 
-        $('btn-scan').addEventListener('click',  () => this.scanShapes());
-        $('btn-demo').addEventListener('click',  () => this.addDemoShapes());
-        $('btn-play').addEventListener('click',  () => this.enterPlayMode());
-        $('btn-stop').addEventListener('click',  () => this.exitPlayMode());
+        // Primary action button — dispatches based on current state
+        $('btn-primary').addEventListener('click', () => {
+            if (this.state === 'playing') {
+                this.exitPlayMode();
+            } else if (this.shapes.length > 0) {
+                this.enterPlayMode();
+            } else {
+                this.scanShapes();
+            }
+        });
+
+        $('btn-demo').addEventListener('click', () => this.addDemoShapes());
         $('btn-clear').addEventListener('click', () => this.clearShapes());
         $('btn-close-editor').addEventListener('click', () => this.closeNoteEditor());
 
-        $('instrument-select').addEventListener('change', e => {
-            this.audio.setPreset(e.target.value);
+        // Instrument picker — segmented toggle
+        for (const btn of document.querySelectorAll('.inst-btn')) {
+            btn.addEventListener('click', () => {
+                document.querySelector('.inst-btn.active')?.classList.remove('active');
+                btn.classList.add('active');
+                this.audio.setPreset(btn.dataset.inst);
+            });
+        }
+
+        // Bottom sheet backdrop tap to close
+        document.querySelector('.sheet-backdrop')?.addEventListener('click', () => {
+            this.closeNoteEditor();
         });
 
         // Canvas interaction (click to edit notes, or play via click/touch)
         this.overlay.addEventListener('click', e => this.onCanvasClick(e));
         this.overlay.addEventListener('touchstart', e => this.onCanvasTouch(e), { passive: false });
-        this.overlay.addEventListener('touchmove',  e => this.onCanvasTouch(e), { passive: false });
-        this.overlay.addEventListener('touchend',   e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
+        this.overlay.addEventListener('touchmove', e => this.onCanvasTouch(e), { passive: false });
+        this.overlay.addEventListener('touchend', e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
         this.overlay.addEventListener('touchcancel', e => { e.preventDefault(); this.releaseAllTouch(); }, { passive: false });
 
         // Resume AudioContext on first user gesture
         const resumeAudio = () => { this.audio.init(); this.audio.resume(); };
-        document.addEventListener('click',      resumeAudio, { once: true });
+        document.addEventListener('click', resumeAudio, { once: true });
         document.addEventListener('touchstart', resumeAudio, { once: true });
     }
 
@@ -139,12 +157,11 @@ class PaperPianoApp {
     async initCamera() {
         this.status('Requesting camera…');
 
-        // Try rear camera first (phone pointing at paper), fall back to any
         let stream;
         try {
             stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width:  { ideal: 640 },
+                    width: { ideal: 640 },
                     height: { ideal: 480 },
                     frameRate: { ideal: 30, min: 15 },
                     facingMode: 'environment'
@@ -153,10 +170,9 @@ class PaperPianoApp {
             });
             this.mirrored = false;
         } catch {
-            // Fall back to default (front) camera
             stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width:  { ideal: 640 },
+                    width: { ideal: 640 },
                     height: { ideal: 480 },
                     frameRate: { ideal: 30, min: 15 }
                 },
@@ -165,28 +181,22 @@ class PaperPianoApp {
             this.mirrored = true;
         }
 
-        // Detect if the chosen camera is front-facing → mirror the feed
         const track = stream.getVideoTracks()[0];
         const settings = track.getSettings?.() || {};
-        if (settings.facingMode === 'user') {
-            this.mirrored = true;
-        }
-        // Desktop webcams don't report facingMode; default to mirrored for them
-        if (!settings.facingMode) {
-            this.mirrored = true;
-        }
+        if (settings.facingMode === 'user') this.mirrored = true;
+        if (!settings.facingMode) this.mirrored = true;
 
         this.video.srcObject = stream;
         await this.video.play();
 
         const vw = this.video.videoWidth;
         const vh = this.video.videoHeight;
-        this.overlay.width  = vw;
+        this.overlay.width = vw;
         this.overlay.height = vh;
-        this.proc.width     = vw;
-        this.proc.height    = vh;
+        this.proc.width = vw;
+        this.proc.height = vh;
 
-        this.status(`Camera active ✓${this.mirrored ? ' (mirrored)' : ''}`);
+        this.status('Camera ready');
     }
 
     // ── Scanning ───────────────────────────────────────────────────────────────
@@ -213,7 +223,7 @@ class PaperPianoApp {
 
         for (let i = 0; i < found.length; i++) {
             const s = found[i];
-            s.color    = SHAPE_COLORS[i % SHAPE_COLORS.length];
+            s.color = SHAPE_COLORS[i % SHAPE_COLORS.length];
             s.isActive = false;
 
             // Try OCR
@@ -227,9 +237,9 @@ class PaperPianoApp {
         }
 
         this.shapes = found;
-        this.state  = 'ready';
-        this.showPlayControls();
-        this.status(`${found.length} shape(s) detected. Click a shape to change its note, then press Play.`);
+        this.state = 'ready';
+        this.updateUI();
+        this.status(`${found.length} shape(s) found. Tap a shape to edit, then Play.`);
     }
 
     // ── Demo shapes (fallback / instant test) ──────────────────────────────────
@@ -237,25 +247,25 @@ class PaperPianoApp {
         const W = this.overlay.width;
         const H = this.overlay.height;
 
-        const notes  = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-        const gap    = 4;
-        const kw     = Math.floor((W - gap * (notes.length + 1)) / notes.length);
-        const kh     = Math.floor(H * 0.28);
+        const notes = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+        const gap = 4;
+        const kw = Math.floor((W - gap * (notes.length + 1)) / notes.length);
+        const kh = Math.floor(H * 0.28);
         const startY = Math.floor(H * 0.65);
         const startX = Math.floor((W - (kw * notes.length + gap * (notes.length - 1))) / 2);
 
         this.shapes = notes.map((note, i) => ({
-            id:       `shape_${i}`,
-            rect:     { x: startX + i * (kw + gap), y: startY, width: kw, height: kh },
-            points:   [],
+            id: `shape_${i}`,
+            rect: { x: startX + i * (kw + gap), y: startY, width: kw, height: kh },
+            points: [],
             note,
-            color:    SHAPE_COLORS[i % SHAPE_COLORS.length],
-            center:   { x: startX + i * (kw + gap) + kw / 2, y: startY + kh / 2 },
+            color: SHAPE_COLORS[i % SHAPE_COLORS.length],
+            center: { x: startX + i * (kw + gap) + kw / 2, y: startY + kh / 2 },
             isActive: false,
-            area:     kw * kh
+            area: kw * kh
         }));
 
-        this.showPlayControls();
+        this.updateUI();
         this.status('Demo piano ready. Press Play!');
     }
 
@@ -265,17 +275,12 @@ class PaperPianoApp {
         this.audio.init();
         this.audio.resume();
         this.state = 'playing';
-
-        document.getElementById('btn-scan').classList.add('hidden');
-        document.getElementById('btn-demo').classList.add('hidden');
-        document.getElementById('btn-play').classList.add('hidden');
-        document.getElementById('btn-stop').classList.remove('hidden');
-        document.getElementById('btn-clear').classList.remove('hidden');
+        this.updateUI();
 
         if (this.hands.ready) {
-            this.status('🎵 Play mode — touch the shapes with your finger!');
+            this.status('Play mode — touch the shapes!');
         } else {
-            this.status('🎵 Play mode — tap / click shapes to play (hand tracking unavailable).');
+            this.status('Play mode — tap shapes to play.');
         }
     }
 
@@ -284,34 +289,58 @@ class PaperPianoApp {
         this.activeShapes.clear();
         this.shapes.forEach(s => s.isActive = false);
         this.state = 'ready';
-
-        document.getElementById('btn-scan').classList.remove('hidden');
-        document.getElementById('btn-demo').classList.remove('hidden');
-        this.showPlayControls();
-        document.getElementById('btn-stop').classList.add('hidden');
-
-        this.status('Stopped. Edit note assignments or press Play again.');
+        this.updateUI();
+        this.status('Stopped. Tap a shape to edit, or press Play.');
     }
 
     clearShapes() {
         this.audio.noteOffAll();
         this.activeShapes.clear();
         this.shapes = [];
-        this.state  = 'ready';
-
-        document.getElementById('btn-scan').classList.remove('hidden');
-        document.getElementById('btn-demo').classList.remove('hidden');
-        document.getElementById('btn-play').classList.add('hidden');
-        document.getElementById('btn-stop').classList.add('hidden');
-        document.getElementById('btn-clear').classList.add('hidden');
-
-        this.status('Cleared. Scan paper or add demo shapes.');
+        this.state = 'ready';
+        this.updateUI();
+        this.status('Cleared. Scan paper or try Demo.');
     }
 
-    showPlayControls() {
-        document.getElementById('btn-play').disabled = false;
-        document.getElementById('btn-play').classList.remove('hidden');
-        document.getElementById('btn-clear').classList.remove('hidden');
+    // ── Unified UI state ────────────────────────────────────────────────────────
+    updateUI() {
+        const btn = document.getElementById('btn-primary');
+        const label = document.getElementById('primary-label');
+        const demo = document.getElementById('btn-demo');
+        const clear = document.getElementById('btn-clear');
+
+        // Primary button state
+        btn.classList.remove('state-scan', 'state-play', 'state-stop');
+        btn.disabled = false;
+
+        if (this.state === 'playing') {
+            btn.classList.add('state-stop');
+            label.textContent = 'Stop';
+        } else if (this.shapes.length > 0) {
+            btn.classList.add('state-play');
+            label.textContent = 'Play';
+        } else {
+            btn.classList.add('state-scan');
+            label.textContent = 'Scan';
+        }
+
+        // Secondary buttons
+        const hasShapes = this.shapes.length > 0;
+        const isPlaying = this.state === 'playing';
+
+        // Demo: only when no shapes and not playing
+        if (!hasShapes && !isPlaying) {
+            demo.classList.remove('hidden');
+        } else {
+            demo.classList.add('hidden');
+        }
+
+        // Clear: only when shapes exist
+        if (hasShapes) {
+            clear.classList.remove('hidden');
+        } else {
+            clear.classList.add('hidden');
+        }
     }
 
     // ── Canvas interaction ─────────────────────────────────────────────────────
@@ -370,8 +399,8 @@ class PaperPianoApp {
 
     canvasPos(cx, cy) {
         const r = this.overlay.getBoundingClientRect();
-        let x = (cx - r.left) * (this.overlay.width  / r.width);
-        const y = (cy - r.top)  * (this.overlay.height / r.height);
+        let x = (cx - r.left) * (this.overlay.width / r.width);
+        const y = (cy - r.top) * (this.overlay.height / r.height);
         // When mirrored, screen-left = internal-right
         if (this.mirrored) x = this.overlay.width - x;
         return { x, y };
@@ -390,7 +419,7 @@ class PaperPianoApp {
         const container = document.getElementById('note-buttons');
         container.innerHTML = '';
 
-        const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+        const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
         const shape = this.shapes.find(s => s.id === shapeId);
 
         for (const n of notes) {
@@ -404,12 +433,12 @@ class PaperPianoApp {
             container.appendChild(btn);
         }
 
-        document.getElementById('note-editor').classList.remove('hidden');
+        document.getElementById('note-editor').classList.add('open');
     }
 
     closeNoteEditor() {
         this._editingId = null;
-        document.getElementById('note-editor').classList.add('hidden');
+        document.getElementById('note-editor').classList.remove('open');
     }
 
     // ── Render loop ────────────────────────────────────────────────────────────
@@ -461,8 +490,8 @@ class PaperPianoApp {
     // ── Draw ───────────────────────────────────────────────────────────────────
     draw() {
         const ctx = this.octx;
-        const W   = this.overlay.width;
-        const H   = this.overlay.height;
+        const W = this.overlay.width;
+        const H = this.overlay.height;
 
         ctx.clearRect(0, 0, W, H);
 
@@ -488,19 +517,19 @@ class PaperPianoApp {
             ctx.save();
             if (isActive) {
                 ctx.shadowColor = color;
-                ctx.shadowBlur  = 22;
+                ctx.shadowBlur = 22;
             }
             ctx.strokeStyle = isActive ? '#FFF' : color;
-            ctx.lineWidth   = isActive ? 3 : 2;
+            ctx.lineWidth = isActive ? 3 : 2;
             ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
             ctx.restore();
 
             // Note label — un-mirror text so it reads correctly
             const fz = Math.max(14, Math.min(rect.width, rect.height) * 0.45);
-            ctx.font          = `bold ${fz}px "Segoe UI", Arial, sans-serif`;
-            ctx.textAlign     = 'center';
-            ctx.textBaseline  = 'middle';
-            const cx = rect.x + rect.width  / 2;
+            ctx.font = `bold ${fz}px "Segoe UI", Arial, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const cx = rect.x + rect.width / 2;
             const cy = rect.y + rect.height / 2;
 
             ctx.save();
@@ -523,7 +552,7 @@ class PaperPianoApp {
 
                 // Connections
                 ctx.strokeStyle = 'rgba(0,255,136,0.35)';
-                ctx.lineWidth   = 1.5;
+                ctx.lineWidth = 1.5;
                 for (const [a, b] of HAND_CONNECTIONS) {
                     ctx.beginPath();
                     ctx.moveTo(lm[a].x, lm[a].y);
@@ -537,10 +566,10 @@ class PaperPianoApp {
                     const r = ti === 8 ? 8 : 5;
                     ctx.beginPath();
                     ctx.arc(lm[ti].x, lm[ti].y, r, 0, Math.PI * 2);
-                    ctx.fillStyle   = ti === 8 ? '#00FF88' : 'rgba(0,255,136,0.5)';
+                    ctx.fillStyle = ti === 8 ? '#00FF88' : 'rgba(0,255,136,0.5)';
                     ctx.fill();
                     ctx.strokeStyle = '#FFF';
-                    ctx.lineWidth   = 1.5;
+                    ctx.lineWidth = 1.5;
                     ctx.stroke();
                 }
             }
@@ -556,8 +585,7 @@ class PaperPianoApp {
         if (ts - this._fpsLast >= 1000) {
             this.fps = this._fpsFrames;
             this._fpsFrames = 0;
-            this._fpsLast   = ts;
-            document.getElementById('fps-counter').textContent = `${this.fps} FPS`;
+            this._fpsLast = ts;
         }
     }
 

@@ -21,14 +21,14 @@ Paper Piano uses your webcam to detect shapes drawn on paper, reads the note nam
 └────────────────┘     └──────────────┘     └─────────────┘
 ```
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| Camera | WebRTC `getUserMedia` | Live video feed |
-| Shape Detection | OpenCV.js (adaptive threshold + contour approximation) | Find drawn rectangles on paper |
-| Note Recognition | Tesseract.js (OCR, single-word mode) | Read note names (C, D#, F, etc.) |
-| Hand Tracking | MediaPipe Tasks-Vision `HandLandmarker` | Real-time finger position tracking |
-| Audio Synthesis | Web Audio API (multi-oscillator + ADSR envelope) | Low-latency musical note playback |
-| Rendering | Canvas 2D | Overlay shapes, labels, hand skeleton |
+| Layer            | Technology                                             | Purpose                               |
+| ---------------- | ------------------------------------------------------ | ------------------------------------- |
+| Camera           | WebRTC `getUserMedia`                                  | Live video feed                       |
+| Shape Detection  | OpenCV.js (adaptive threshold + contour approximation) | Find drawn rectangles on paper        |
+| Note Recognition | Tesseract.js (OCR, single-word mode)                   | Read note names (C, D#, F, etc.)      |
+| Hand Tracking    | MediaPipe Tasks-Vision `HandLandmarker`                | Real-time finger position tracking    |
+| Audio Synthesis  | Web Audio API (multi-oscillator + ADSR envelope)       | Low-latency musical note playback     |
+| Rendering        | Canvas 2D                                              | Overlay shapes, labels, hand skeleton |
 
 ### Why a Web App?
 
@@ -130,14 +130,14 @@ python -m http.server 8000
 
 ## Performance Considerations
 
-| Concern | Mitigation |
-|---|---|
-| **Audio latency** | `latencyHint: 'interactive'` + OscillatorNode (no decode step) → ~5–20 ms |
-| **Shape detection cost** | Run once on scan, not per-frame; shapes are cached |
-| **OCR cost** | Run once per shape after detection; cached results |
-| **Hand tracking FPS** | MediaPipe uses GPU via WebGL/WebGPU; typically 25–45 fps on laptops |
-| **Memory (OpenCV)** | All cv.Mat objects tracked and explicitly deleted to prevent WASM heap leaks |
-| **Large downloads** | Libraries loaded async + cached by browser; loading screen shown |
+| Concern                  | Mitigation                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| **Audio latency**        | `latencyHint: 'interactive'` + OscillatorNode (no decode step) → ~5–20 ms    |
+| **Shape detection cost** | Run once on scan, not per-frame; shapes are cached                           |
+| **OCR cost**             | Run once per shape after detection; cached results                           |
+| **Hand tracking FPS**    | MediaPipe uses GPU via WebGL/WebGPU; typically 25–45 fps on laptops          |
+| **Memory (OpenCV)**      | All cv.Mat objects tracked and explicitly deleted to prevent WASM heap leaks |
+| **Large downloads**      | Libraries loaded async + cached by browser; loading screen shown             |
 
 ---
 

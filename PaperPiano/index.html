@@ -1,91 +1,83 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Paper Piano — Draw &amp; Play Music</title>
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Paper Piano</title>
     <link rel="stylesheet" href="css/style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎹</text></svg>">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎹</text></svg>">
 </head>
+
 <body>
     <div id="app">
 
-        <!-- ════════ Loading Screen ════════ -->
+        <!-- Loading Screen -->
         <div id="loading-screen">
             <div class="loader-box">
-                <h1>🎹 Paper Piano</h1>
+                <h1>Paper Piano</h1>
                 <p>Draw instruments on paper and play them with your hands</p>
                 <div class="spinner"></div>
                 <div id="loading-status">Initializing…</div>
             </div>
         </div>
 
-        <!-- ════════ Main Interface ════════ -->
+        <!-- Main Interface -->
         <div id="main-interface" class="hidden">
 
-            <!-- Status bar -->
-            <div id="status-bar">
-                <span id="status-text">Loading…</span>
-                <span id="fps-counter">-- FPS</span>
-            </div>
-
-            <!-- Camera + overlay -->
+            <!-- Full-bleed camera -->
             <div id="camera-container">
                 <video id="video" autoplay playsinline muted></video>
                 <canvas id="overlay-canvas"></canvas>
                 <canvas id="processing-canvas"></canvas>
             </div>
 
-            <!-- Controls -->
-            <div id="controls">
-                <button id="btn-scan" class="btn btn-primary" title="Detect shapes on paper">
-                    <span class="btn-icon">📷</span> Scan Paper
-                </button>
-                <button id="btn-demo" class="btn btn-accent" title="Add preset piano keys">
-                    <span class="btn-icon">🎹</span> Demo Shapes
-                </button>
-                <button id="btn-play" class="btn btn-success hidden" disabled title="Enter play mode">
-                    <span class="btn-icon">▶</span> Play
-                </button>
-                <button id="btn-stop" class="btn btn-warning hidden" title="Stop playing">
-                    <span class="btn-icon">⏹</span> Stop
-                </button>
-                <button id="btn-clear" class="btn btn-danger hidden" title="Remove all shapes">
-                    <span class="btn-icon">✖</span> Clear
+            <!-- Floating status pill -->
+            <div id="status-pill">
+                <span id="status-text">Loading…</span>
+            </div>
+
+            <!-- Bottom action bar -->
+            <div id="action-bar">
+                <div class="action-side">
+                    <button id="btn-demo" class="action-secondary">Demo</button>
+                    <button id="btn-clear" class="action-secondary action-clear hidden">Clear</button>
+                </div>
+
+                <button id="btn-primary" class="action-primary state-scan">
+                    <span id="primary-label">Scan</span>
                 </button>
 
-                <div class="control-divider"></div>
-
-                <label class="select-wrap" title="Instrument sound">
-                    🎛️
-                    <select id="instrument-select">
-                        <option value="piano">Piano</option>
-                        <option value="organ">Organ</option>
-                        <option value="synth">Synth</option>
-                    </select>
-                </label>
+                <div class="action-side">
+                    <div id="instrument-picker">
+                        <button class="inst-btn active" data-inst="piano">Piano</button>
+                        <button class="inst-btn" data-inst="organ">Organ</button>
+                        <button class="inst-btn" data-inst="synth">Synth</button>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <!-- ════════ Note Editor Modal ════════ -->
-        <div id="note-editor" class="hidden">
-            <div class="modal-backdrop"></div>
-            <div class="modal-content">
-                <h3>Assign Note to Shape</h3>
+        <!-- Note Editor Bottom Sheet -->
+        <div id="note-editor">
+            <div class="sheet-backdrop"></div>
+            <div class="sheet-content">
+                <div class="sheet-handle"></div>
+                <h3>Assign Note</h3>
                 <div id="note-buttons"></div>
-                <button id="btn-close-editor" class="btn btn-secondary">Cancel</button>
+                <button id="btn-close-editor" class="action-secondary sheet-cancel">Cancel</button>
             </div>
         </div>
     </div>
 
-    <!-- ════════ External Libraries (CDN) ════════ -->
-    <!-- OpenCV.js – computer vision for shape detection -->
+    <!-- External Libraries (CDN) -->
     <script async src="https://docs.opencv.org/4.10.0/opencv.js"></script>
-    <!-- Tesseract.js – OCR for reading note names -->
     <script async src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <!-- MediaPipe is loaded dynamically as an ES module inside hand-tracker.js -->
 
-    <!-- ════════ Application (ES modules) ════════ -->
+    <!-- Application (ES modules) -->
     <script type="module" src="js/main.js"></script>
 </body>
+
 </html>
