@@ -62,6 +62,7 @@
 
     let prevPressed   = new Set();      // shape ids currently held
     let activeHUD     = new Map();      // id → timeout handle
+    let debounceMap   = new Map();      // shape id → timestamp of last release
 
     // FPS tracking
     let frameCount = 0;
@@ -152,11 +153,16 @@
         const pressed = notes.getPresses(tips, cw, ch, pad);
         const curSet  = new Set(pressed.map(p => p.shape.id));
 
-        // Notes ON — newly pressed
+        const now = performance.now();
+
+        // Notes ON — newly pressed (with debounce: ignore re-trigger within 100ms)
         for (const p of pressed) {
             if (!prevPressed.has(p.shape.id)) {
-                audio.play(p.shape.id, p.shape.note, p.shape.instrument);
-                showNoteHUD(p.shape);
+                const lastOff = debounceMap.get(p.shape.id) || 0;
+                if (now - lastOff > 100) {
+                    audio.play(p.shape.id, p.shape.note, p.shape.instrument);
+                    showNoteHUD(p.shape);
+                }
             }
         }
 
@@ -164,6 +170,7 @@
         for (const id of prevPressed) {
             if (!curSet.has(id)) {
                 audio.stop(id);
+                debounceMap.set(id, now);
             }
         }
 

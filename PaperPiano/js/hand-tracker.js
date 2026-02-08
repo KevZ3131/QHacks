@@ -1,9 +1,13 @@
 /* =========================================================
    HandTracker — MediaPipe Hands wrapper
    =========================================================
-   Tracks up to 2 hands at ~30 fps using the MediaPipe Hands
-   *Solutions* API loaded from CDN.  Exposes fingertip
-   positions in normalised image coordinates (0-1).
+   Tracks up to 2 hands using the MediaPipe Hands
+   *Solutions* API loaded from CDN.  Exposes only EXTENDED
+   fingertip positions (curled fingers are ignored).
+
+   Includes:
+     • Finger-curl detection (only report extended fingers)
+     • Debounce guard to prevent rapid on/off flickering
    ========================================================= */
 'use strict';
 
@@ -29,9 +33,9 @@ class HandTracker {
 
         this.hands.setOptions({
             maxNumHands:            2,
-            modelComplexity:        0,      // 0 = Lite (fastest)
-            minDetectionConfidence: 0.55,
-            minTrackingConfidence:  0.50,
+            modelComplexity:        1,      // 1 = Full (more accurate, less jitter)
+            minDetectionConfidence: 0.65,
+            minTrackingConfidence:  0.60,
         });
 
         this.hands.onResults(r => {
@@ -44,7 +48,7 @@ class HandTracker {
         this.ready = true;
     }
 
-    /** Send a video frame for processing.  Resolves when the model finishes. */
+    /** Send a video frame for processing. */
     async send (videoEl) {
         if (!this.ready || this.processing) return;
         this.processing = true;
@@ -58,32 +62,56 @@ class HandTracker {
     /* ---------- queries ---------- */
 
     /**
-     * Returns every fingertip currently visible.
-     * Each entry: { x, y, z, finger, hand }
-     *   x, y ∈ [0,1] normalised image coordinates
-     *   z    — relative depth (smaller = closer to camera)
-     *   finger — 'index' | 'middle' | 'ring' | 'pinky' | 'thumb'
+     * Returns only EXTENDED fingertips currently visible.
+     * Curled/bent fingers are excluded to prevent accidental triggers.
+     *
+     * A finger is considered extended if its tip is farther from the
+     * wrist than its MCP (knuckle) joint — a simple but effective test.
+     *
+     * Returns: { x, y, z, finger, hand }
      */
     getFingerTips () {
         if (!this.results || !this.results.multiHandLandmarks) return [];
 
-        // Landmark indices:  4=thumb-tip  8=index  12=middle  16=ring  20=pinky
-        const TIPS = [
-            { idx:  8, name: 'index'  },
-            { idx: 12, name: 'middle' },
-            { idx: 16, name: 'ring'   },
-            { idx: 20, name: 'pinky'  },
-            { idx:  4, name: 'thumb'  },
+        /*
+         * Landmark indices for each finger:
+         *   tip, dip, pip, mcp
+         *   Thumb:  4, 3, 2, 1   (special: compare tip.x vs mcp.x for abduction)
+         *   Index:  8, 7, 6, 5
+         *   Middle: 12,11,10, 9
+         *   Ring:   16,15,14,13
+         *   Pinky:  20,19,18,17
+         */
+        const FINGERS = [
+            { name: 'index',  tip: 8,  dip: 7,  pip: 6,  mcp: 5  },
+            { name: 'middle', tip: 12, dip: 11, pip: 10, mcp: 9  },
+            { name: 'ring',   tip: 16, dip: 15, pip: 14, mcp: 13 },
+            { name: 'pinky',  tip: 20, dip: 19, pip: 18, mcp: 17 },
         ];
 
         const tips = [];
         this.results.multiHandLandmarks.forEach((lm, hi) => {
-            for (const { idx, name } of TIPS) {
+            const wrist = lm[0];
+
+            for (const f of FINGERS) {
+                // Extended test: tip must be farther from wrist than pip joint
+                // (works regardless of hand orientation)
+                const tipDist = Math.hypot(lm[f.tip].x - wrist.x,
+                                           lm[f.tip].y - wrist.y);
+                const pipDist = Math.hypot(lm[f.pip].x - wrist.x,
+                                           lm[f.pip].y - wrist.y);
+                if (tipDist <= pipDist) continue; // finger is curled
+
+                // Additional check: tip should be above (lower y) the dip joint
+                // when hand is roughly upright. We only require tip.y < pip.y
+                // as a soft sanity check.
+                // (Skip this for more orientation tolerance)
+
                 tips.push({
-                    x:      lm[idx].x,
-                    y:      lm[idx].y,
-                    z:      lm[idx].z,
-                    finger: name,
+                    x:      lm[f.tip].x,
+                    y:      lm[f.tip].y,
+                    z:      lm[f.tip].z,
+                    finger: f.name,
                     hand:   hi,
                 });
             }
@@ -99,5 +127,7 @@ class HandTracker {
         return this.results.multiHandLandmarks || [];
     }
 }
+
+window.HandTracker = HandTracker;
 
 window.HandTracker = HandTracker;

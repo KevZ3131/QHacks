@@ -272,14 +272,12 @@ class ShapeDetector {
      * @param {cv.Mat|null} paperCnt – paper contour (used for size filtering)
      */
     _extractShapes (binaryImg, label, paperCnt) {
-        // Morphological close → merge broken contours from hand-drawn lines
+        // Morphological close → merge broken pen strokes within a single shape.
+        // Keep the kernel small (3×3) so adjacent shapes don't merge together.
+        // No dilation — it bridges gaps between neighbouring keys.
         const closed = new cv.Mat();
-        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+        const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
         cv.morphologyEx(binaryImg, closed, cv.MORPH_CLOSE, kernel);
-
-        // Dilate to thicken thin pen strokes
-        const dilateK = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-        cv.dilate(closed, closed, dilateK);
 
         const contours  = new cv.MatVector();
         const hierarchy = new cv.Mat();
@@ -312,8 +310,9 @@ class ShapeDetector {
                 if (inside < 0) continue; // center is outside paper
             }
 
+            // Use a tighter epsilon (2%) so rectangle corners are preserved
             const approx = new cv.Mat();
-            cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
+            cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
             const verts       = approx.rows;
             const circularity = (4 * Math.PI * area) / (peri * peri);
@@ -321,28 +320,50 @@ class ShapeDetector {
             const extent      = area / (rect.width * rect.height);
             const aspect      = rect.width / rect.height;
 
-            const isCircular    = circularity >= 0.50 && aspect >= 0.5 && aspect <= 2.0;
-            const isRectangular = verts >= 4 && circularity < 0.82 && extent > 0.35;
+            console.log(`[Shape ${label}#${i}] v=${verts} circ=${circularity.toFixed(3)} ext=${extent.toFixed(3)} asp=${aspect.toFixed(2)} area=${area.toFixed(0)}`);
 
-            if (isCircular && circularity >= 0.65) {
-                circles.push(this._scaleCircle(rect, area));
-            } else if (isRectangular && !isCircular) {
-                rectangles.push(this._scaleRect(rect, area));
-            } else if (isCircular) {
-                if (aspect >= 0.7 && aspect <= 1.4) {
-                    circles.push(this._scaleCircle(rect, area));
-                } else {
+            /*
+             * Classification strategy — vertex count is the primary signal:
+             *
+             * CIRCLE:  high circularity (>= 0.75) AND aspect close to 1:1
+             *          OR many vertices (>= 8) with circularity >= 0.60
+             *
+             * RECTANGLE: 4-6 vertices (tight approxPolyDP preserves corners)
+             *            with low circularity (< 0.75) and decent fill (extent > 0.35)
+             *
+             * The key insight is: with a 2% epsilon, a rectangle keeps exactly
+             * 4 vertices while a circle/ellipse has 8+ vertices.
+             */
+
+            // PRIMARY: vertex count is the strongest signal
+            if (verts === 4 || verts === 5) {
+                // Almost certainly a rectangle (4 corners, maybe 5 with a wobbly edge)
+                if (extent > 0.30) {
                     rectangles.push(this._scaleRect(rect, area));
                 }
-            } else if (verts >= 4 && extent > 0.25) {
-                rectangles.push(this._scaleRect(rect, area));
+            } else if (verts === 6 || verts === 7) {
+                // Ambiguous zone: could be a rounded rect or an irregular circle
+                if (circularity >= 0.75 && aspect >= 0.65 && aspect <= 1.55) {
+                    circles.push(this._scaleCircle(rect, area));
+                } else if (extent > 0.30) {
+                    rectangles.push(this._scaleRect(rect, area));
+                }
+            } else if (verts >= 8) {
+                // Many vertices → likely a circle/ellipse
+                if (circularity >= 0.55 && aspect >= 0.45 && aspect <= 2.2) {
+                    circles.push(this._scaleCircle(rect, area));
+                } else if (extent > 0.30) {
+                    // Very irregular but still filled → rectangle fallback
+                    rectangles.push(this._scaleRect(rect, area));
+                }
             }
+            // verts < 4: skip (triangle or noise)
 
             approx.delete();
         }
 
         // Cleanup
-        closed.delete(); kernel.delete(); dilateK.delete();
+        closed.delete(); kernel.delete();
         contours.delete(); hierarchy.delete();
 
         return { rectangles, circles };
