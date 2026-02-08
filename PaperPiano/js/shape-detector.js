@@ -12,7 +12,7 @@ export class ShapeDetector {
         if (onProgress) onProgress('Loading OpenCV…');
 
         await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('OpenCV load timeout (60 s)')), 60000);
+            const timeout = setTimeout(() => reject(new Error('OpenCV load timeout (15 s)')), 15000);
 
             const check = () => {
                 if (typeof cv !== 'undefined') {

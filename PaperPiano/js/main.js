@@ -57,6 +57,10 @@ class PaperPianoApp {
         this._fpsLast = 0;
         this.fps = 0;
 
+        // Hand-detection throttle
+        this._lastDetectTime = 0;
+        this._detectInterval = 50;  // ms (~20 fps for detection)
+
         // DOM refs (bound in bindElements)
         this.video = null;
         this.overlay = null;
@@ -70,33 +74,52 @@ class PaperPianoApp {
         this.bindElements();
         this.bindEvents();
 
-        const results = await Promise.allSettled([
-            this.initCamera(),
-            this.shapes_.init(s => this.status(s)),
-            this.ocr.init(s => this.status(s)),
-            this.hands.init(s => this.status(s))
-        ]);
-
-        const [cam, ocv, ocrRes, handsRes] = results;
-
-        if (cam.status === 'rejected') {
+        // ── Step 1: Camera is the only hard requirement ────────────────────
+        try {
+            await this.initCamera();
+        } catch (err) {
             this.showError('Camera access denied. Allow camera and reload the page.');
             return;
         }
 
-        // Log which optional modules failed
-        if (ocv.status === 'rejected') console.warn('OpenCV unavailable:', ocv.reason);
-        if (ocrRes.status === 'rejected') console.warn('OCR unavailable:', ocrRes.reason);
-        if (handsRes.status === 'rejected') console.warn('Hand tracking unavailable:', handsRes.reason);
-
+        // Camera works → show the UI immediately
         this.hideLoading();
         this.state = 'ready';
+        this.status('Camera ready. Loading models…');
+        this.startRenderLoop();
+
+        // ── Step 2: Load optional modules in background ────────────────────
+        // Delay slightly so the render loop can start painting the live camera
+        const bg = async (name, promise, timeoutMs) => {
+            try {
+                await Promise.race([
+                    promise,
+                    new Promise((_, rej) => setTimeout(() => rej(new Error(`${name} timed out`)), timeoutMs))
+                ]);
+            } catch (err) {
+                console.warn(`${name} unavailable:`, err.message || err);
+            }
+            this._updateReadyStatus();
+        };
+
+        // Stagger starts so heavy WASM compilation doesn't starve the render loop
+        await new Promise(r => setTimeout(r, 300));
+        bg('OpenCV',        this.shapes_.init(s => this.status(s)), 15000);
+        bg('OCR',           this.ocr.init(s => this.status(s)),     10000);
+        await new Promise(r => setTimeout(r, 500));
+        bg('Hand tracking', this.hands.init(s => this.status(s)),   20000);
+    }
+
+    _updateReadyStatus() {
+        const missing = [];
+        if (!this.shapes_.ready) missing.push('OpenCV');
+        if (!this.hands.ready)   missing.push('hands');
+        const suffix = missing.length ? ` (loading: ${missing.join(', ')}…)` : '';
         this.status(
             this.shapes_.ready
-                ? 'Ready — point at paper and tap Scan.'
-                : 'OpenCV unavailable — try Demo instead.'
+                ? `Ready — point at paper and tap Scan.${suffix}`
+                : `Use Demo to get started.${suffix}`
         );
-        this.startRenderLoop();
     }
 
     // ── DOM binding ────────────────────────────────────────────────────────────
@@ -456,6 +479,10 @@ class PaperPianoApp {
     update(ts) {
         if (this.state !== 'playing' || !this.hands.ready) return;
 
+        // Throttle MediaPipe detection to ~20fps so draw() stays smooth
+        if (ts - this._lastDetectTime < this._detectInterval) return;
+        this._lastDetectTime = ts;
+
         const res = this.hands.detect(this.video, ts);
         this.lastHandRes = res;
         if (!res) return;
@@ -514,15 +541,14 @@ class PaperPianoApp {
             ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
 
             // Border
-            ctx.save();
-            if (isActive) {
-                ctx.shadowColor = color;
-                ctx.shadowBlur = 22;
-            }
             ctx.strokeStyle = isActive ? '#FFF' : color;
-            ctx.lineWidth = isActive ? 3 : 2;
+            ctx.lineWidth = isActive ? 4 : 2;
             ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-            ctx.restore();
+            if (isActive) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(rect.x - 3, rect.y - 3, rect.width + 6, rect.height + 6);
+            }
 
             // Note label — un-mirror text so it reads correctly
             const fz = Math.max(14, Math.min(rect.width, rect.height) * 0.45);
