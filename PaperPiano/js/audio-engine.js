@@ -4,23 +4,23 @@
 'use strict';
 
 class AudioEngine {
-    constructor () {
+    constructor() {
         /** @type {AudioContext|null} */
-        this.ctx          = null;
-        this.masterGain   = null;
-        this.compressor   = null;
-        this.initialized  = false;
+        this.ctx = null;
+        this.masterGain = null;
+        this.compressor = null;
+        this.initialized = false;
         /** Map<shapeId, {stop:Function}> */
-        this.activeNotes  = new Map();
+        this.activeNotes = new Map();
         /** Pre-computed note → frequency table */
-        this.freq         = {};
+        this.freq = {};
         this._buildFrequencyTable();
     }
 
     /* ---------- public ---------- */
 
     /** Must be called from a user-gesture handler (click / tap). */
-    init () {
+    init() {
         if (this.initialized) return;
         this.ctx = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -43,7 +43,7 @@ class AudioEngine {
     }
 
     /** Resume context if it was suspended (autoplay policy). */
-    async resume () {
+    async resume() {
         if (this.ctx && this.ctx.state === 'suspended') {
             await this.ctx.resume();
         }
@@ -55,7 +55,7 @@ class AudioEngine {
      * @param {string} note     – e.g. 'C4', 'kick', 'snare'
      * @param {string} instrument – 'piano' | 'drums'
      */
-    play (id, note, instrument) {
+    play(id, note, instrument) {
         if (!this.initialized) return;
         if (this.activeNotes.has(id)) return; // already sounding
         this.resume();
@@ -65,7 +65,7 @@ class AudioEngine {
     }
 
     /** Release a sustained note. */
-    stop (id) {
+    stop(id) {
         if (!this.initialized) return;
         const entry = this.activeNotes.get(id);
         if (!entry) return;
@@ -74,17 +74,17 @@ class AudioEngine {
     }
 
     /** Release every sounding note. */
-    stopAll () {
+    stopAll() {
         for (const [id] of this.activeNotes) this.stop(id);
     }
 
     /* ---------- piano ---------- */
 
-    _pianoOn (id, noteName) {
+    _pianoOn(id, noteName) {
         const f = this.freq[noteName];
         if (!f) return;
 
-        const t  = this.ctx.currentTime;
+        const t = this.ctx.currentTime;
         const out = this.compressor;
 
         // Envelope gain node
@@ -96,10 +96,10 @@ class AudioEngine {
 
         // Harmonics: fundamental + 2nd + 3rd + soft 5th partial
         const partials = [
-            { type: 'triangle', detune:  0, gain: 0.50 },
-            { type: 'sine',     detune:  0, gain: 0.18, ratio: 2 },
-            { type: 'sine',     detune:  0, gain: 0.06, ratio: 3 },
-            { type: 'sine',     detune: -5, gain: 0.03, ratio: 5 },
+            { type: 'triangle', detune: 0, gain: 0.50 },
+            { type: 'sine', detune: 0, gain: 0.18, ratio: 2 },
+            { type: 'sine', detune: 0, gain: 0.06, ratio: 3 },
+            { type: 'sine', detune: -5, gain: 0.03, ratio: 5 },
         ];
 
         const oscs = partials.map(p => {
@@ -127,24 +127,24 @@ class AudioEngine {
 
     /* ---------- drums ---------- */
 
-    _drumHit (id, type) {
+    _drumHit(id, type) {
         const t = this.ctx.currentTime;
         switch (type) {
-            case 'kick':   this._kick(t);   break;
-            case 'snare':  this._snare(t);  break;
-            case 'hihat':  this._hihat(t);  break;
-            case 'tom1':   this._tom(t, 160); break;
-            case 'tom2':   this._tom(t, 110); break;
-            case 'crash':  this._crash(t);  break;
-            default:       this._kick(t);   break;
+            case 'kick': this._kick(t); break;
+            case 'snare': this._snare(t); break;
+            case 'hihat': this._hihat(t); break;
+            case 'tom1': this._tom(t, 160); break;
+            case 'tom2': this._tom(t, 110); break;
+            case 'crash': this._crash(t); break;
+            default: this._kick(t); break;
         }
         // Drums are one-shot; stop is a no-op.  Remove after sound ends.
-        this.activeNotes.set(id, { stop: () => {} });
+        this.activeNotes.set(id, { stop: () => { } });
         setTimeout(() => this.activeNotes.delete(id), 600);
     }
 
-    _kick (t) {
-        const osc  = this.ctx.createOscillator();
+    _kick(t) {
+        const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.connect(gain).connect(this.compressor);
         osc.frequency.setValueAtTime(150, t);
@@ -154,9 +154,9 @@ class AudioEngine {
         osc.start(t); osc.stop(t + 0.35);
     }
 
-    _snare (t) {
+    _snare(t) {
         // Noise burst
-        const buf   = this._noiseBuffer(0.18);
+        const buf = this._noiseBuffer(0.18);
         const noise = this.ctx.createBufferSource();
         noise.buffer = buf;
         const hp = this.ctx.createBiquadFilter();
@@ -177,21 +177,21 @@ class AudioEngine {
         osc.start(t); osc.stop(t + 0.08);
     }
 
-    _hihat (t) {
-        const buf   = this._noiseBuffer(0.06);
+    _hihat(t) {
+        const buf = this._noiseBuffer(0.06);
         const noise = this.ctx.createBufferSource();
         noise.buffer = buf;
         const hp = this.ctx.createBiquadFilter();
         hp.type = 'highpass'; hp.frequency.value = 7500;
-        const g  = this.ctx.createGain();
+        const g = this.ctx.createGain();
         g.gain.setValueAtTime(0.45, t);
         g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
         noise.connect(hp).connect(g).connect(this.compressor);
         noise.start(t); noise.stop(t + 0.06);
     }
 
-    _tom (t, freq) {
-        const osc  = this.ctx.createOscillator();
+    _tom(t, freq) {
+        const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.connect(gain).connect(this.compressor);
         osc.frequency.setValueAtTime(freq, t);
@@ -201,13 +201,13 @@ class AudioEngine {
         osc.start(t); osc.stop(t + 0.28);
     }
 
-    _crash (t) {
-        const buf   = this._noiseBuffer(0.55);
+    _crash(t) {
+        const buf = this._noiseBuffer(0.55);
         const noise = this.ctx.createBufferSource();
         noise.buffer = buf;
         const bp = this.ctx.createBiquadFilter();
         bp.type = 'bandpass'; bp.frequency.value = 5500; bp.Q.value = 0.6;
-        const g  = this.ctx.createGain();
+        const g = this.ctx.createGain();
         g.gain.setValueAtTime(0.55, t);
         g.gain.exponentialRampToValueAtTime(0.001, t + 0.50);
         noise.connect(bp).connect(g).connect(this.compressor);
@@ -216,16 +216,16 @@ class AudioEngine {
 
     /* ---------- helpers ---------- */
 
-    _noiseBuffer (seconds) {
+    _noiseBuffer(seconds) {
         const len = this.ctx.sampleRate * seconds;
         const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-        const d   = buf.getChannelData(0);
+        const d = buf.getChannelData(0);
         for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
         return buf;
     }
 
-    _buildFrequencyTable () {
-        const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    _buildFrequencyTable() {
+        const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
         for (let oct = 0; oct <= 8; oct++) {
             names.forEach((n, i) => {
                 const midi = (oct + 1) * 12 + i;          // C4 = MIDI 60

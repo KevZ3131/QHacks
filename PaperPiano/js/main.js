@@ -11,96 +11,101 @@
     /* ==============================================================
        DOM handles
        ============================================================== */
-    const $splash        = document.getElementById('splash');
-    const $app           = document.getElementById('app');
-    const $startBtn      = document.getElementById('startBtn');
+    const $splash = document.getElementById('splash');
+    const $app = document.getElementById('app');
+    const $startBtn = document.getElementById('startBtn');
 
-    const $video         = document.getElementById('video');
-    const $overlay       = document.getElementById('overlay');
-    const $loadingOvr    = document.getElementById('loadingOverlay');
-    const $loadingTxt    = document.getElementById('loadingText');
+    const $video = document.getElementById('video');
+    const $overlay = document.getElementById('overlay');
+    const $loadingOvr = document.getElementById('loadingOverlay');
+    const $loadingTxt = document.getElementById('loadingText');
 
-    const $scanBtn       = document.getElementById('scanBtn');
-    const $autoScanBtn   = document.getElementById('autoScanBtn');
-    const $mirrorBtn     = document.getElementById('mirrorBtn');
+    const $scanBtn = document.getElementById('scanBtn');
+    const $autoScanBtn = document.getElementById('autoScanBtn');
 
-    const $octaveSlider  = document.getElementById('octaveSlider');
-    const $octaveVal     = document.getElementById('octaveVal');
-    const $sensSlider    = document.getElementById('sensitivitySlider');
+    const $octaveSlider = document.getElementById('octaveSlider');
+    const $octaveVal = document.getElementById('octaveVal');
+    const $sensSlider = document.getElementById('sensitivitySlider');
 
-    const $debugBtn      = document.getElementById('debugBtn');
-    const $debugPanel    = document.getElementById('debugPanel');
-    const $debugCanvas   = document.getElementById('debugCanvas');
-    const $debugInfo     = document.getElementById('debugInfo');
+    const $debugBtn = document.getElementById('debugBtn');
+    const $debugPanel = document.getElementById('debugPanel');
+    const $debugCanvas = document.getElementById('debugCanvas');
+    const $debugInfo = document.getElementById('debugInfo');
 
-    const $noteHUD       = document.getElementById('noteHUD');
-    const $shapeBadge    = document.getElementById('shapeBadge');
-    const $keyCount      = document.getElementById('keyCount');
-    const $padCount      = document.getElementById('padCount');
-    const $fpsEl         = document.getElementById('fps');
+    const $noteHUD = document.getElementById('noteHUD');
+    const $shapeBadge = document.getElementById('shapeBadge');
+    const $keyCount = document.getElementById('keyCount');
+    const $padCount = document.getElementById('padCount');
+    const $fpsEl = document.getElementById('fps');
 
-    const $camDot        = document.querySelector('#cameraStatus .dot');
-    const $handDot       = document.querySelector('#handStatus .dot');
-    const $cvDot         = document.querySelector('#cvStatus .dot');
+    const $camDot = document.querySelector('#cameraStatus .dot');
+    const $handDot = document.querySelector('#handStatus .dot');
+    const $cvDot = document.querySelector('#cvStatus .dot');
 
     /* Song mode DOM handles */
-    const $songModeBtn   = document.getElementById('songModeBtn');
-    const $songPanel     = document.getElementById('songPanel');
+    const $songModeBtn = document.getElementById('songModeBtn');
+    const $songPanel = document.getElementById('songPanel');
     const $songPanelClose = document.getElementById('songPanelClose');
-    const $songSearch    = document.getElementById('songSearch');
+    const $songSearch = document.getElementById('songSearch');
     const $songSearchBtn = document.getElementById('songSearchBtn');
     const $songRefreshBtn = document.getElementById('songRefreshBtn');
-    const $songList      = document.getElementById('songList');
-    const $songControls  = document.getElementById('songControls');
+    const $songList = document.getElementById('songList');
+    const $songControls = document.getElementById('songControls');
     const $songNowPlaying = document.getElementById('songNowPlaying');
-    const $songPlayBtn   = document.getElementById('songPlayBtn');
-    const $songPauseBtn  = document.getElementById('songPauseBtn');
-    const $songStopBtn   = document.getElementById('songStopBtn');
+    const $songPlayBtn = document.getElementById('songPlayBtn');
+    const $songPauseBtn = document.getElementById('songPauseBtn');
+    const $songStopBtn = document.getElementById('songStopBtn');
     const $songSpeedSlider = document.getElementById('songSpeedSlider');
-    const $songSpeedVal  = document.getElementById('songSpeedVal');
+    const $songSpeedVal = document.getElementById('songSpeedVal');
 
     /* ==============================================================
        Subsystems
        ============================================================== */
-    const audio  = new AudioEngine();
-    const hands  = new HandTracker();
+    const audio = new AudioEngine();
+    const hands = new HandTracker();
     const shapes = new ShapeDetector();
-    const notes  = new NoteRecognizer();
+    const notes = new NoteRecognizer();
     const songPlayer = new SongPlayer(audio);
 
     /* ==============================================================
        State
        ============================================================== */
-    let running       = false;
-    let mirrored      = false;
-    let autoScan      = false;
+    let running = false;
+    let autoScan = false;
     let autoScanTimer = null;
-    let showDebug     = false;
-    let songMode      = false;
+    let showDebug = false;
+    let songMode = false;
 
-    let prevPressed   = new Set();      // shape ids currently held
-    let activeHUD     = new Map();      // id → timeout handle
+    let prevPressed = new Set();      // shape ids currently held
+    let activeHUD = new Map();      // id → timeout handle
 
     /* ----------------------------------------------------------
-     * Tap detector — tracks fingertip vertical motion and fires
-     * a tap event when a quick downward movement is detected.
+     * Finger State Machine — robust press detection
+     * --------------------------------------------------------
+     * Each finger goes through states:
+     *   IDLE → PRESSING → HELD → RELEASING → IDLE
      *
-     * For each finger (keyed by "hand:finger") we store a short
-     * history of y-positions.  A tap is recognised when:
-     *   1. The finger moved DOWN (y increased) significantly
-     *      over the last few frames (velocity > threshold).
-     *   2. On this frame the finger is inside a shape.
+     * IDLE:      Finger not touching any key
+     * PRESSING:  Finger just entered a key zone; we wait a few
+     *            frames to confirm it's intentional (debounce)
+     * HELD:      Note is playing; sustain until finger leaves
+     * RELEASING: Finger left the key; short cooldown before
+     *            the state resets (prevents flicker)
      *
-     * After a tap fires the note sustains as long as the finger
-     * remains on the shape.  When the finger lifts off (leaves
-     * the shape), the note stops.
-     * ---------------------------------------------------------- */
-    const tapState = {};   // key → { yHist: number[], lastTapTime: number }
+     * Hysteresis: the "exit" zone for a key is larger than the
+     * "enter" zone, so small jitter at key edges won't cause
+     * rapid on/off toggling.
+     * -------------------------------------------------------- */
+    const fingerState = {};   // key → state object
 
-    const TAP_HISTORY    = 4;      // frames of history to keep
-    const TAP_VEL_THRESH = 0.008;  // min downward y-delta (normalised) over history window
-    const TAP_COOLDOWN   = 250;    // ms before same finger can tap again
-    const MIN_SUSTAIN    = 150;    // ms minimum hold time to prevent flicker
+    // --- Tuning constants ---
+    const PRESS_CONFIRM_MS = 30;   // ms finger must stay on key before note fires
+    const RELEASE_CONFIRM_MS = 50;  // ms finger must be off key before we stop the note
+    const TAP_COOLDOWN = 180;  // ms before same finger can re-trigger same key
+    const MIN_SUSTAIN = 80;   // ms minimum hold time
+    const HYSTERESIS_PAD = 8;    // extra px added to exit zone (beyond entry zone)
+    const POSITION_HISTORY = 6;    // frames of position history for smoothing
+    const POSITION_SMOOTH = 0.4;  // exponential smoothing factor for press position
 
     /**
      * Held notes: maps fingerKey → { shapeId, startTime }
@@ -109,61 +114,58 @@
     const heldNotes = new Map();
 
     /**
-     * Update tap tracking for a single fingertip.
-     * @returns {boolean} true if a tap was just detected this frame
+     * Get or create finger state for a given finger key.
      */
-    function updateTap (tip) {
-        const key = tip.hand + ':' + tip.finger;
-        const now = performance.now();
-
-        if (!tapState[key]) {
-            tapState[key] = { yHist: [tip.y], lastTapTime: 0 };
-            return false;
+    function getFingerState(fingerKey) {
+        if (!fingerState[fingerKey]) {
+            fingerState[fingerKey] = {
+                state: 'IDLE',
+                candidateShape: null,
+                enterTime: 0,
+                leaveTime: 0,
+                lastTriggerTime: 0,
+                smoothX: null,
+                smoothY: null,
+                posHistory: [],  // recent {x,y} values for stability check
+            };
         }
-
-        const st = tapState[key];
-        st.yHist.push(tip.y);
-        if (st.yHist.length > TAP_HISTORY) st.yHist.shift();
-
-        // Need at least 2 frames of history
-        if (st.yHist.length < 2) return false;
-
-        // Cooldown check
-        if (now - st.lastTapTime < TAP_COOLDOWN) return false;
-
-        // Compute downward velocity:  positive = moving down in screen coords
-        const oldest = st.yHist[0];
-        const newest = st.yHist[st.yHist.length - 1];
-        const vel    = newest - oldest;   // >0 means finger moved down
-
-        if (vel > TAP_VEL_THRESH) {
-            st.lastTapTime = now;
-            st.yHist.length = 0;          // reset so we don't re-trigger
-            return true;
-        }
-
-        return false;
+        return fingerState[fingerKey];
     }
 
-    /** Clean up tap state for fingers that disappeared. */
-    function pruneOldTaps (activeTips) {
+    /** Clean up state for fingers that disappeared for too long. */
+    function pruneFingerState(activeTips) {
         const activeKeys = new Set(activeTips.map(t => t.hand + ':' + t.finger));
-        for (const key of Object.keys(tapState)) {
-            if (!activeKeys.has(key)) delete tapState[key];
+        const now = performance.now();
+        for (const key of Object.keys(fingerState)) {
+            if (!activeKeys.has(key)) {
+                const fs = fingerState[key];
+                // If finger disappeared and was holding a note, release it
+                if (fs.state === 'HELD') {
+                    const held = heldNotes.get(key);
+                    if (held && now - held.startTime >= MIN_SUSTAIN) {
+                        audio.stop(held.shapeId);
+                        prevPressed.delete(held.shapeId);
+                        heldNotes.delete(key);
+                    }
+                }
+                delete fingerState[key];
+            }
         }
     }
 
     /**
      * Hit-test a pixel position against all assigned shapes.
      * Returns the best matching shape or null.
+     * @param {number} extraPad – additional padding beyond the base pad
      */
-    function hitTestShapeAt (px, py, pad) {
+    function hitTestShapeAt(px, py, pad, extraPad = 0) {
+        const totalPad = pad + extraPad;
         const hits = notes.assignedShapes.filter(s => {
             if (s.type === 'rectangle') {
-                return px >= s.x - pad && px <= s.x + s.width + pad &&
-                       py >= s.y - pad && py <= s.y + s.height + pad;
+                return px >= s.x - totalPad && px <= s.x + s.width + totalPad &&
+                    py >= s.y - totalPad && py <= s.y + s.height + totalPad;
             } else if (s.type === 'circle') {
-                return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + pad;
+                return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius + totalPad;
             }
             return false;
         });
@@ -175,9 +177,31 @@
         return hits[0];
     }
 
+    /**
+     * Smooth a fingertip position using exponential moving average.
+     * Reduces micro-jitter while keeping responsiveness.
+     */
+    function smoothFingerPos(fs, rawX, rawY) {
+        if (fs.smoothX === null) {
+            fs.smoothX = rawX;
+            fs.smoothY = rawY;
+        } else {
+            fs.smoothX += POSITION_SMOOTH * (rawX - fs.smoothX);
+            fs.smoothY += POSITION_SMOOTH * (rawY - fs.smoothY);
+        }
+        // Track position history for stability detection
+        fs.posHistory.push({ x: fs.smoothX, y: fs.smoothY });
+        if (fs.posHistory.length > POSITION_HISTORY) fs.posHistory.shift();
+        return { x: fs.smoothX, y: fs.smoothY };
+    }
+
     // FPS tracking
     let frameCount = 0;
     let lastFpsTime = performance.now();
+
+    // Frame pacing: ensure consistent hand-tracking frame rate
+    let lastSendTime = 0;
+    const MIN_SEND_INTERVAL = 28; // ~35 fps max send rate — avoids queuing
 
     /* ==============================================================
        Boot
@@ -189,14 +213,14 @@
         await boot();
     });
 
-    async function boot () {
+    async function boot() {
         try {
             /* ---- camera ---- */
             setLoading('Starting camera…');
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width:      { ideal: 1280 },
-                    height:     { ideal: 720 },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
                     facingMode: 'environment',
                 },
                 audio: false,
@@ -205,8 +229,12 @@
             await $video.play();
             $camDot.classList.add('ok');
 
+            // Auto-mirror so the user sees themselves naturally
+            $video.classList.add('mirrored');
+            $overlay.classList.add('mirrored');
+
             // Match canvas to video native resolution
-            $overlay.width  = $video.videoWidth;
+            $overlay.width = $video.videoWidth;
             $overlay.height = $video.videoHeight;
 
             /* ---- hand tracker ---- */
@@ -240,11 +268,14 @@
        ============================================================== */
     const octx = $overlay.getContext('2d');
 
-    function frame () {
+    function frame() {
         if (!running) { requestAnimationFrame(frame); return; }
 
-        // Send frame to hand tracker (non-blocking)
-        if (hands.ready && !hands.processing) {
+        const now = performance.now();
+
+        // Send frame to hand tracker at a paced rate to avoid queuing
+        if (hands.ready && !hands.processing && (now - lastSendTime >= MIN_SEND_INTERVAL)) {
+            lastSendTime = now;
             hands.send($video);
         }
 
@@ -265,76 +296,132 @@
     /* ==============================================================
        Interaction: finger → shape → sound
        ============================================================== */
-    function processInteraction () {
+    function processInteraction() {
         const tips = hands.getFingerTips();
-        const cw   = $overlay.width;
-        const ch   = $overlay.height;
-        const pad  = (+$sensSlider.value / 100) * 30;
-        const now  = performance.now();
+        const cw = $overlay.width;
+        const ch = $overlay.height;
+        const pad = (+$sensSlider.value / 100) * 30;
+        const now = performance.now();
 
-        pruneOldTaps(tips);
+        pruneFingerState(tips);
 
-        // Build a set of active finger keys this frame
-        const activeFingers = new Set(tips.map(t => t.hand + ':' + t.finger));
-
-        // --- Phase 1: detect new taps and start holding ---
         for (const tip of tips) {
             const fingerKey = tip.hand + ':' + tip.finger;
+            const fs = getFingerState(fingerKey);
 
-            // If this finger is already holding a note, skip tap detection
-            if (heldNotes.has(fingerKey)) continue;
+            // Smooth the raw position to reduce jitter
+            const rawPx = tip.x * cw;
+            const rawPy = tip.y * ch;
+            const { x: px, y: py } = smoothFingerPos(fs, rawPx, rawPy);
 
-            const tapped = updateTap(tip);
-            if (!tapped) continue;
+            switch (fs.state) {
+                case 'IDLE': {
+                    // Check if finger entered any key zone
+                    const shape = hitTestShapeAt(px, py, pad);
+                    if (shape) {
+                        // Cooldown: prevent re-triggering the same key too fast
+                        if (now - fs.lastTriggerTime < TAP_COOLDOWN &&
+                            fs.candidateShape === shape.id) {
+                            break;
+                        }
+                        fs.state = 'PRESSING';
+                        fs.candidateShape = shape.id;
+                        fs.enterTime = now;
+                    }
+                    break;
+                }
 
-            const px = tip.x * cw;
-            const py = tip.y * ch;
-            const shape = hitTestShapeAt(px, py, pad);
-            if (!shape) continue;
+                case 'PRESSING': {
+                    // Confirm the press: finger must stay on the same key
+                    const shape = hitTestShapeAt(px, py, pad);
+                    if (!shape || shape.id !== fs.candidateShape) {
+                        // Finger left before confirmation — reset
+                        fs.state = 'IDLE';
+                        fs.candidateShape = null;
+                        break;
+                    }
 
-            // Start holding this note
-            audio.play(shape.id, shape.note, shape.instrument);
-            showNoteHUD(shape);
-            prevPressed.add(shape.id);
-            heldNotes.set(fingerKey, { shapeId: shape.id, startTime: now });
+                    if (now - fs.enterTime >= PRESS_CONFIRM_MS) {
+                        // Confirmed press — trigger the note
+                        audio.play(shape.id, shape.note, shape.instrument);
+                        showNoteHUD(shape);
+                        prevPressed.add(shape.id);
+                        heldNotes.set(fingerKey, { shapeId: shape.id, startTime: now });
+                        fs.state = 'HELD';
+                        fs.lastTriggerTime = now;
+                    }
+                    break;
+                }
+
+                case 'HELD': {
+                    const held = heldNotes.get(fingerKey);
+                    if (!held) {
+                        fs.state = 'IDLE';
+                        break;
+                    }
+
+                    // Use hysteresis: bigger exit zone than entry zone
+                    const shapeStill = hitTestShapeAt(px, py, pad, HYSTERESIS_PAD);
+
+                    if (!shapeStill || shapeStill.id !== held.shapeId) {
+                        // Finger moved off — start release timer
+                        fs.state = 'RELEASING';
+                        fs.leaveTime = now;
+                    }
+                    break;
+                }
+
+                case 'RELEASING': {
+                    const held = heldNotes.get(fingerKey);
+                    if (!held) {
+                        fs.state = 'IDLE';
+                        break;
+                    }
+
+                    // Check if finger came back onto the same key
+                    const shapeBack = hitTestShapeAt(px, py, pad, HYSTERESIS_PAD);
+                    if (shapeBack && shapeBack.id === held.shapeId) {
+                        // Came back — cancel the release
+                        fs.state = 'HELD';
+                        break;
+                    }
+
+                    // Confirm release after debounce period
+                    const heldLongEnough = now - held.startTime >= MIN_SUSTAIN;
+                    const awayLongEnough = now - fs.leaveTime >= RELEASE_CONFIRM_MS;
+
+                    if (heldLongEnough && awayLongEnough) {
+                        audio.stop(held.shapeId);
+                        prevPressed.delete(held.shapeId);
+                        heldNotes.delete(fingerKey);
+                        fs.state = 'IDLE';
+                        fs.candidateShape = held.shapeId; // remember for cooldown
+                    }
+                    break;
+                }
+            }
         }
 
-        // --- Phase 2: sustain or release held notes ---
+        // Handle held notes whose fingers disappeared (not caught by pruneFingerState
+        // because finger may still be in tips but just moved away)
         for (const [fingerKey, held] of heldNotes) {
-            // Find the current position of this finger
-            const tip = tips.find(t => (t.hand + ':' + t.finger) === fingerKey);
-
-            // Finger disappeared entirely — release after min sustain
-            if (!tip) {
+            if (!tips.find(t => (t.hand + ':' + t.finger) === fingerKey)) {
                 if (now - held.startTime >= MIN_SUSTAIN) {
                     audio.stop(held.shapeId);
                     prevPressed.delete(held.shapeId);
                     heldNotes.delete(fingerKey);
-                }
-                continue;
-            }
-
-            // Finger still visible — check if it's still on the same shape
-            const px = tip.x * cw;
-            const py = tip.y * ch;
-            const shape = hitTestShapeAt(px, py, pad);
-
-            if (!shape || shape.id !== held.shapeId) {
-                // Finger moved off the shape — release (after min sustain)
-                if (now - held.startTime >= MIN_SUSTAIN) {
-                    audio.stop(held.shapeId);
-                    prevPressed.delete(held.shapeId);
-                    heldNotes.delete(fingerKey);
+                    if (fingerState[fingerKey]) {
+                        fingerState[fingerKey].state = 'IDLE';
+                    }
                 }
             }
-            // else: finger is still on the shape, keep sustaining
         }
     }
 
     /* ==============================================================
        Drawing overlay
        ============================================================== */
-    function draw () {
+    function draw() {
         const cw = $overlay.width;
         const ch = $overlay.height;
         octx.clearRect(0, 0, cw, ch);
@@ -349,7 +436,7 @@
             }
             octx.closePath();
             octx.strokeStyle = 'rgba(0,255,180,0.55)';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.setLineDash([8, 6]);
             octx.stroke();
             octx.setLineDash([]);
@@ -357,25 +444,25 @@
 
         // ---- draw shapes ----
         for (const s of notes.assignedShapes) {
-            const active   = prevPressed.has(s.id);
-            const editing  = editingShape && editingShape.id === s.id;
+            const active = prevPressed.has(s.id);
+            const editing = editingShape && editingShape.id === s.id;
 
             if (s.type === 'rectangle') {
-                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.lineWidth = (active || editing) ? 4 : 2;
                 octx.strokeStyle = active ? '#FF5722'
                     : editing ? '#FFD600'
-                    : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)'
+                        : (s.isBlack ? 'rgba(180,180,255,0.7)' : 'rgba(100,180,255,0.7)');
+                octx.fillStyle = active ? 'rgba(255,87,34,0.30)'
                     : editing ? 'rgba(255,214,0,0.18)'
-                    : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
+                        : (s.isBlack ? 'rgba(100,100,200,0.12)' : 'rgba(70,150,255,0.10)');
                 octx.fillRect(s.x, s.y, s.width, s.height);
                 octx.strokeRect(s.x, s.y, s.width, s.height);
             } else if (s.type === 'circle') {
                 octx.beginPath();
                 octx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
-                octx.lineWidth   = (active || editing) ? 4 : 2;
+                octx.lineWidth = (active || editing) ? 4 : 2;
                 octx.strokeStyle = active ? '#FF5722' : editing ? '#FFD600' : 'rgba(76,175,80,0.8)';
-                octx.fillStyle   = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
+                octx.fillStyle = active ? 'rgba(255,87,34,0.30)' : editing ? 'rgba(255,214,0,0.18)' : 'rgba(76,175,80,0.12)';
                 octx.fill();
                 octx.stroke();
             }
@@ -383,13 +470,13 @@
             // Note label
             const tx = s.type === 'circle' ? s.centerX : s.x + s.width / 2;
             const ty = s.type === 'circle' ? s.centerY : s.y + s.height / 2;
-            octx.font         = `bold ${active ? 22 : 17}px sans-serif`;
-            octx.textAlign    = 'center';
+            octx.font = `bold ${active ? 22 : 17}px sans-serif`;
+            octx.textAlign = 'center';
             octx.textBaseline = 'middle';
-            octx.strokeStyle  = 'rgba(0,0,0,0.7)';
-            octx.lineWidth    = 3;
+            octx.strokeStyle = 'rgba(0,0,0,0.7)';
+            octx.lineWidth = 3;
             octx.strokeText(s.note, tx, ty);
-            octx.fillStyle    = active ? '#FFF' : '#e0e0ff';
+            octx.fillStyle = active ? '#FFF' : '#e0e0ff';
             octx.fillText(s.note, tx, ty);
         }
 
@@ -400,10 +487,10 @@
             const y = t.y * ch;
             octx.beginPath();
             octx.arc(x, y, 9, 0, Math.PI * 2);
-            octx.fillStyle   = 'rgba(255,60,60,0.6)';
+            octx.fillStyle = 'rgba(255,60,60,0.6)';
             octx.fill();
             octx.strokeStyle = '#fff';
-            octx.lineWidth   = 2;
+            octx.lineWidth = 2;
             octx.stroke();
         }
 
@@ -428,96 +515,67 @@
      * directly into notes.assignedShapes so all existing interaction,
      * drawing, and song-mode code works automatically.
      */
-    function createDefaultPiano () {
-        const cw  = $overlay.width  || 1280;
-        const ch  = $overlay.height || 720;
+    function createDefaultPiano() {
+        const cw = $overlay.width || 1280;
+        const ch = $overlay.height || 720;
         const oct = +$octaveSlider.value;
 
-        const WHITE = ['C','D','E','F','G','A','B'];
-        // Which white-key indices have a black key to their right
-        const BLACK_AFTER = { 0:'C#', 1:'D#', 3:'F#', 4:'G#', 5:'A#' };
-
-        const numWhites = 14; // 2 full octaves
-        const gap  = 8;      // px gap between white keys
-        const keyW = Math.floor((cw - gap * (numWhites - 1)) / numWhites);
-        const whiteH = Math.floor(ch * 0.28);
-        const blackH = Math.floor(whiteH * 0.6);
-        const blackW = Math.floor(keyW * 0.55);
-        const topY   = ch - whiteH;
-        const stride = keyW + gap;  // center-to-edge distance between keys
+        const CHROMATIC = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+        const numOctaves = 2;
+        const totalKeys = CHROMATIC.length * numOctaves; // 24 keys
+        const gap = 4;       // px gap between keys
+        const keyW = Math.floor((cw - gap * (totalKeys - 1)) / totalKeys);
+        const keyH = Math.floor(ch * 0.28);
+        const topY = ch - keyH;
+        const stride = keyW + gap;
 
         const assigned = [];
 
-        // ---- white keys ----
-        for (let i = 0; i < numWhites; i++) {
-            const ni  = i % WHITE.length;
-            const o   = oct + Math.floor(i / WHITE.length);
-            const x   = i * stride;
-            assigned.push({
-                type:       'rectangle',
-                x:          x,
-                y:          topY,
-                width:      keyW,
-                height:     whiteH,
-                centerX:    x + keyW / 2,
-                centerY:    topY + whiteH / 2,
-                area:       keyW * whiteH,
-                id:         'w' + i,
-                note:       WHITE[ni] + o,
-                instrument: 'piano',
-                isBlack:    false,
-                priority:   0,
-            });
-        }
+        for (let i = 0; i < totalKeys; i++) {
+            const ni = i % CHROMATIC.length;
+            const o = oct + Math.floor(i / CHROMATIC.length);
+            const noteName = CHROMATIC[ni];
+            const isBlack = noteName.includes('#');
+            const x = i * stride;
 
-        // ---- black keys ----
-        let bi = 0;
-        for (let i = 0; i < numWhites; i++) {
-            const ni = i % WHITE.length;
-            if (!(ni in BLACK_AFTER)) continue;
-
-            const o  = oct + Math.floor(i / WHITE.length);
-            const x  = i * stride + keyW + gap / 2 - blackW / 2;
-            const blackY = topY - Math.floor(blackH * 0.4);
             assigned.push({
-                type:       'rectangle',
-                x:          x,
-                y:          blackY,
-                width:      blackW,
-                height:     blackH,
-                centerX:    x + blackW / 2,
-                centerY:    blackY + blackH / 2,
-                area:       blackW * blackH,
-                id:         'b' + bi,
-                note:       BLACK_AFTER[ni] + o,
+                type: 'rectangle',
+                x: x,
+                y: topY,
+                width: keyW,
+                height: keyH,
+                centerX: x + keyW / 2,
+                centerY: topY + keyH / 2,
+                area: keyW * keyH,
+                id: 'k' + i,
+                note: noteName + o,
                 instrument: 'piano',
-                isBlack:    true,
-                priority:   1,
+                isBlack: isBlack,
+                priority: 0,
             });
-            bi++;
         }
 
         notes.assignedShapes = assigned;
 
-        const nKeys = assigned.filter(s => !s.isBlack).length;
+        const nWhite = assigned.filter(s => !s.isBlack).length;
         const nBlack = assigned.filter(s => s.isBlack).length;
-        $keyCount.textContent = nKeys + nBlack;
+        $keyCount.textContent = nWhite + nBlack;
         $padCount.textContent = 0;
         $shapeBadge.classList.remove('hidden');
 
-        console.log(`[Piano] default keyboard: ${nKeys} white + ${nBlack} black keys, octave ${oct}`);
+        console.log(`[Piano] default keyboard: ${nWhite} white + ${nBlack} black keys, octave ${oct}`);
     }
 
     /* ==============================================================
        Shape scanning
        ============================================================== */
-    function scanShapes () {
-        const oct    = +$octaveSlider.value;
+    function scanShapes() {
+        const oct = +$octaveSlider.value;
         // Always pass debug canvas so we can inspect threshold if needed
         const dbgCvs = showDebug ? $debugCanvas : null;
 
         console.log('[Scan] scanning shapes… octave=' + oct);
-        const raw    = shapes.detect($video, dbgCvs);
+        const raw = shapes.detect($video, dbgCvs);
         const assigned = notes.assignNotes(raw, oct);
 
         const nKeys = assigned.filter(s => s.type === 'rectangle').length;
@@ -557,12 +615,6 @@
         }
     });
 
-    $mirrorBtn.addEventListener('click', () => {
-        mirrored = !mirrored;
-        $video.classList.toggle('mirrored', mirrored);
-        $overlay.classList.toggle('mirrored', mirrored);
-    });
-
     $octaveSlider.addEventListener('input', () => {
         $octaveVal.textContent = $octaveSlider.value;
         // Re-assign notes at new octave
@@ -600,7 +652,7 @@
         $songModeBtn.classList.remove('active');
     });
 
-    async function refreshSongList () {
+    async function refreshSongList() {
         $songList.innerHTML = '<div style="color: var(--text-dim); font-size:.78rem;">Loading…</div>';
         try {
             const songs = await songPlayer.fetchSongList();
@@ -610,7 +662,7 @@
         }
     }
 
-    function renderSongList (songs) {
+    function renderSongList(songs) {
         if (songs.length === 0) {
             $songList.innerHTML = '<div style="color: var(--text-dim); font-size:.78rem;">No songs found. Add .mid files to midi_songs/</div>';
             return;
@@ -680,34 +732,34 @@
     /* ==============================================================
        Shape Editor — click a shape on the overlay to change its sound
        ============================================================== */
-    const $shapeEditor  = document.getElementById('shapeEditor');
-    const $editorTitle  = document.getElementById('editorTitle');
-    const $editorBody   = document.getElementById('editorBody');
-    const $editorClose  = document.getElementById('editorClose');
+    const $shapeEditor = document.getElementById('shapeEditor');
+    const $editorTitle = document.getElementById('editorTitle');
+    const $editorBody = document.getElementById('editorBody');
+    const $editorClose = document.getElementById('editorClose');
 
-    let editingShape    = null;  // reference into notes.assignedShapes
+    let editingShape = null;  // reference into notes.assignedShapes
 
     // All chromatic notes across one octave
-    const ALL_NOTES     = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    const DRUM_OPTIONS  = ['kick','snare','hihat','tom1','tom2','crash'];
+    const ALL_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const DRUM_OPTIONS = ['kick', 'snare', 'hihat', 'tom1', 'tom2', 'crash'];
 
     /** Convert overlay-canvas click to video-pixel coordinates. */
-    function overlayClickToVideoPx (e) {
+    function overlayClickToVideoPx(e) {
         const rect = $overlay.getBoundingClientRect();
-        const scaleX = $overlay.width  / rect.width;
+        const scaleX = $overlay.width / rect.width;
         const scaleY = $overlay.height / rect.height;
         return {
             x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top)  * scaleY,
+            y: (e.clientY - rect.top) * scaleY,
         };
     }
 
     /** Hit-test a click against assigned shapes (same priority rules as finger presses). */
-    function hitTestShapes (px, py) {
+    function hitTestShapes(px, py) {
         const hits = notes.assignedShapes.filter(s => {
             if (s.type === 'rectangle') {
                 return px >= s.x && px <= s.x + s.width &&
-                       py >= s.y && py <= s.y + s.height;
+                    py >= s.y && py <= s.y + s.height;
             } else if (s.type === 'circle') {
                 return Math.hypot(px - s.centerX, py - s.centerY) <= s.radius;
             }
@@ -722,25 +774,25 @@
     }
 
     /** Open the editor popup anchored near the click position. */
-    function openEditor (shape, clickEvt) {
+    function openEditor(shape, clickEvt) {
         editingShape = shape;
         $shapeEditor.classList.remove('hidden');
 
         // Position: near the click, but keep inside the camera container
         const container = document.getElementById('cameraContainer');
-        const cRect     = container.getBoundingClientRect();
+        const cRect = container.getBoundingClientRect();
         let left = clickEvt.clientX - cRect.left + 12;
-        let top  = clickEvt.clientY - cRect.top  + 12;
+        let top = clickEvt.clientY - cRect.top + 12;
 
         // Clamp so popup doesn't overflow
         const edW = 260, edH = 240;
-        if (left + edW > cRect.width)  left = cRect.width  - edW - 8;
-        if (top  + edH > cRect.height) top  = cRect.height - edH - 8;
+        if (left + edW > cRect.width) left = cRect.width - edW - 8;
+        if (top + edH > cRect.height) top = cRect.height - edH - 8;
         if (left < 4) left = 4;
-        if (top  < 4) top  = 4;
+        if (top < 4) top = 4;
 
         $shapeEditor.style.left = left + 'px';
-        $shapeEditor.style.top  = top  + 'px';
+        $shapeEditor.style.top = top + 'px';
 
         // Build content based on instrument type
         if (shape.instrument === 'piano') {
@@ -750,7 +802,7 @@
         }
     }
 
-    function closeEditor () {
+    function closeEditor() {
         $shapeEditor.classList.add('hidden');
         editingShape = null;
     }
@@ -765,10 +817,10 @@
     });
 
     /** Build a piano-note picker (chromatic, with octave selector). */
-    function buildPianoEditor (shape) {
+    function buildPianoEditor(shape) {
         // Parse current note & octave
         const curBase = shape.note.replace(/\d+$/, '');
-        const curOct  = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
+        const curOct = parseInt(shape.note.match(/\d+$/)?.[0] ?? '4', 10);
 
         $editorTitle.textContent = '🎹 Piano Key — ' + shape.id;
 
@@ -787,7 +839,7 @@
         html += '<div class="editor-section-label">Note</div>';
         html += '<div class="editor-grid">';
         for (const n of ALL_NOTES) {
-            const sel   = n === curBase ? ' selected' : '';
+            const sel = n === curBase ? ' selected' : '';
             const sharp = n.includes('#') ? ' sharp' : '';
             html += `<button class="note-btn${sel}${sharp}" data-action="set-note" data-note="${n}">${n}</button>`;
         }
@@ -819,7 +871,7 @@
     }
 
     /** Build a drum-type picker. */
-    function buildDrumEditor (shape) {
+    function buildDrumEditor(shape) {
         $editorTitle.textContent = '🥁 Drum Pad — ' + shape.id;
 
         let html = '<div class="editor-section-label">Drum Sound</div>';
@@ -860,7 +912,7 @@
     /* ==============================================================
        HUD (floating note names on play)
        ============================================================== */
-    function showNoteHUD (shape) {
+    function showNoteHUD(shape) {
         // Remove old bubble for this id if it exists
         if (activeHUD.has(shape.id)) {
             clearTimeout(activeHUD.get(shape.id).timer);
@@ -877,11 +929,11 @@
     /* ==============================================================
        Helpers
        ============================================================== */
-    function setLoading (msg) {
+    function setLoading(msg) {
         $loadingTxt.textContent = msg;
     }
 
-    function waitForOpenCV () {
+    function waitForOpenCV() {
         return new Promise((resolve) => {
             console.log('[OpenCV] waiting for cv to load…');
 
@@ -899,7 +951,7 @@
                 resolve();
             }, 45000);
 
-            function onReady () {
+            function onReady() {
                 clearInterval(poll);
                 clearTimeout(timeout);
                 console.log('[OpenCV] runtime ready — cv.Mat exists:', typeof cv.Mat === 'function');
@@ -943,7 +995,7 @@
         });
     }
 
-    function updateFPS () {
+    function updateFPS() {
         frameCount++;
         const now = performance.now();
         if (now - lastFpsTime >= 1000) {
