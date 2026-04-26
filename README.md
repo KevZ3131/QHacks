@@ -1,4 +1,4 @@
-# Paper Piano
+# Paper Band
 
 > Draw instruments on paper, point your camera, and play them with your fingers in real time.
 
