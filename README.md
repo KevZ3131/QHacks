@@ -2,13 +2,13 @@
 
 > Draw instruments on paper, point your camera, and play them with your fingers in real time.
 
-Built at **QHacks 2026**.
+https://github.com/user-attachments/assets/b5359d2a-ccfd-45c1-9dd5-7456fb068898
 
 ---
 
 ## What It Does
 
-Paper Piano turns any sheet of paper into a musical instrument. Draw rectangles for piano keys and circles for drum pads with a marker, point your webcam at the paper, and tap the shapes with your fingertips to play sounds — no special hardware required.
+Paper Band turns any sheet of paper into a musical instrument. Draw rectangles for piano keys and circles for drum pads with a marker, point your webcam at the paper, and tap the shapes with your fingertips to play sounds — no special hardware required.
 
 ---
 
