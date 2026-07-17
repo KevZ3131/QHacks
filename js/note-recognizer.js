@@ -130,17 +130,18 @@ class NoteRecognizer {
      * we use that white key's note + '#'.
      */
     _deriveBlackNote (blackKey, whiteKeys, fallbackIdx, octave) {
-        let leftWhite = null;
-        for (const w of whiteKeys) {
-            if (w.centerX < blackKey.centerX) {
-                if (!leftWhite || w.centerX > leftWhite.centerX) leftWhite = w;
-            }
-        }
-        if (leftWhite) {
-            const base = leftWhite.note.replace(/\d+$/, '');
-            const oct  = leftWhite.note.match(/\d+$/)?.[0] ?? octave;
-            // Only add '#' if the note isn't already a sharp
-            if (!base.includes('#')) return base + '#' + oct;
+        const sharpable = new Set(['C', 'D', 'F', 'G', 'A']);
+        const leftWhites = whiteKeys
+            .filter(w => w.centerX < blackKey.centerX)
+            .sort((a, b) => b.centerX - a.centerX);
+
+        // E and B do not have black keys above them. If a contour is slightly
+        // misplaced, use the closest valid black-key boundary to avoid a
+        // silent E# or B# note.
+        for (const white of leftWhites) {
+            const base = white.note.replace(/\d+$/, '');
+            const oct = white.note.match(/\d+$/)?.[0] ?? octave;
+            if (sharpable.has(base)) return base + '#' + oct;
         }
         // Fallback: cycle through standard black notes
         const ni  = fallbackIdx % this.BLACK_NOTES.length;

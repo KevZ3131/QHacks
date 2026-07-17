@@ -56,6 +56,13 @@ class ShapeDetector {
                     'scale', this._sx.toFixed(2), this._sy.toFixed(2));
     }
 
+    /** Release OpenCV resources retained for the overlay. */
+    destroy () {
+        if (this.paperContour) this.paperContour.delete();
+        this.paperContour = null;
+        this.ready = false;
+    }
+
     /**
      * Run shape detection on the current video frame.
      * @param {HTMLVideoElement} video
@@ -111,10 +118,12 @@ class ShapeDetector {
         let log = '';
         if (!paperCnt) {
             log += 'Paper: NOT FOUND (scanning full frame)  ';
+            if (this.paperContour) this.paperContour.delete();
             this.paperContour = null;
         } else {
             const paperRect = cv.boundingRect(paperCnt);
             log += `Paper: ${paperRect.width}x${paperRect.height} @(${paperRect.x},${paperRect.y})  `;
+            if (this.paperContour) this.paperContour.delete();
             this.paperContour = paperCnt;
         }
 

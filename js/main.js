@@ -60,6 +60,8 @@
     let autoScanTimer = null;
     let isScanning = false;   // guard against concurrent scans
     let showDebug = false;
+    let cameraStream = null;
+    let visionReady = false;
 
     let prevPressed = new Set();      // shape ids currently held
     let activeHUD = new Map();      // id → timeout handle
@@ -217,6 +219,7 @@
        ============================================================== */
     $startBtn.addEventListener('click', async () => {
         audio.init();                    // must happen inside user gesture
+        $startBtn.disabled = true;
         $splash.classList.add('hidden');
         $app.classList.remove('hidden');
         await boot();
@@ -224,9 +227,12 @@
 
     async function boot() {
         try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('This browser does not support camera access.');
+            }
             /* ---- camera ---- */
             setLoading('Starting camera…');
-            const stream = await navigator.mediaDevices.getUserMedia({
+            cameraStream = await navigator.mediaDevices.getUserMedia({
                 video: {
                     width: { ideal: 1280 },
                     height: { ideal: 720 },
@@ -234,7 +240,7 @@
                 },
                 audio: false,
             });
-            $video.srcObject = stream;
+            $video.srcObject = cameraStream;
             await $video.play();
             $camDot.classList.add('ok');
 
@@ -251,17 +257,30 @@
 
             /* ---- OpenCV ---- */
             setLoading('Loading OpenCV.js…');
-            await waitForOpenCV();
-            shapes.init($video.videoWidth, $video.videoHeight);
-            $cvDot.classList.add('ok');
+            visionReady = await waitForOpenCV();
+            if (visionReady) {
+                shapes.init($video.videoWidth, $video.videoHeight);
+                $cvDot.classList.remove('warn');
+                $cvDot.classList.add('ok');
+                $scanBtn.disabled = false;
+            } else {
+                setLoading('Vision failed to load. Reload to try again.');
+                $cvDot.classList.add('warn');
+                $autoScanBtn.disabled = true;
+            }
 
             /* ---- ready ---- */
-            $loadingOvr.classList.add('hidden');
-            $scanBtn.disabled = false;
+            if (visionReady) $loadingOvr.classList.add('hidden');
             running = true;
             requestAnimationFrame(frame);
         } catch (err) {
-            setLoading('Error: ' + err.message);
+            stopCamera();
+            $app.classList.add('hidden');
+            $splash.classList.remove('hidden');
+            $startBtn.disabled = false;
+            $startBtn.textContent = 'Retry Camera';
+            const note = $splash.querySelector('.note');
+            note.textContent = 'Unable to start: ' + err.message;
             console.error(err);
         }
     }
@@ -468,40 +487,36 @@
             return;
         }
         isScanning = true;
+        try {
+            const oct = +$octaveSlider.value;
+            const dbgCvs = showDebug ? $debugCanvas : null;
 
-        const oct = +$octaveSlider.value;
-        const dbgCvs = showDebug ? $debugCanvas : null;
+            console.log('[Scan] scanning shapes… octave=' + oct);
 
-        console.log('[Scan] scanning shapes… octave=' + oct);
+            const raw = shapes.detect($video, dbgCvs);
+            const assigned = notes.assignNotes(raw, oct);
+            const nKeys = assigned.filter(s => s.type === 'rectangle').length;
+            const nPads = assigned.filter(s => s.type === 'circle').length;
 
-        const raw = shapes.detect($video, dbgCvs);
+            $keyCount.textContent = nKeys;
+            $padCount.textContent = nPads;
+            $shapeBadge.classList.toggle('hidden', nKeys + nPads === 0);
 
-        // --- Assign notes ---
-        const assigned = notes.assignNotes(raw, oct);
+            const log = shapes.lastLog || '(no strategies ran)';
+            $debugInfo.textContent =
+                `Method: opencv\n${log}\n` +
+                `Detected → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}\n` +
+                `Assigned: ${assigned.length} shapes\n` +
+                assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})${s.points ? ' [' + s.points.length + ' pts]' : ''}`).join('\n');
 
-        const nKeys = assigned.filter(s => s.type === 'rectangle').length;
-        const nPads = assigned.filter(s => s.type === 'circle').length;
-
-        $keyCount.textContent = nKeys;
-        $padCount.textContent = nPads;
-        $shapeBadge.classList.toggle('hidden', nKeys + nPads === 0);
-
-        // Debug info
-        const log = shapes.lastLog || '(no strategies ran)';
-        $debugInfo.textContent =
-            `Method: opencv\n` +
-            `${log}\n` +
-            `Detected → Rects: ${raw.rectangles.length}  Circles: ${raw.circles.length}\n` +
-            `Assigned: ${assigned.length} shapes\n` +
-            assigned.map(s => `  ${s.id} → ${s.note} (${s.instrument})${s.points ? ' [' + s.points.length + ' pts]' : ''}`).join('\n');
-
-        if (nKeys + nPads === 0) {
-            console.warn('[Scan] No shapes found.');
+            if (nKeys + nPads === 0) console.warn('[Scan] No shapes found.');
+            console.log(`[Scan] opencv | paper: ${!!shapes.paperContour}`);
+        } catch (err) {
+            $debugInfo.textContent = 'Scan failed: ' + err.message;
+            console.error('[Scan] failed:', err);
+        } finally {
+            isScanning = false;
         }
-
-        console.log(`[Scan] opencv | paper: ${!!shapes.paperContour}`);
-
-        isScanning = false;
     }
 
     /* ==============================================================
@@ -747,6 +762,21 @@
         $loadingTxt.textContent = msg;
     }
 
+    function stopCamera() {
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            cameraStream = null;
+        }
+        $video.srcObject = null;
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (autoScanTimer) clearInterval(autoScanTimer);
+        audio.stopAll();
+        shapes.destroy();
+        stopCamera();
+    });
+
     function waitForOpenCV() {
         return new Promise((resolve) => {
             console.log('[OpenCV] waiting for cv to load…');
@@ -754,7 +784,7 @@
             // Check if already fully loaded
             if (typeof cv !== 'undefined' && typeof cv.Mat === 'function') {
                 console.log('[OpenCV] already loaded');
-                resolve();
+                resolve(true);
                 return;
             }
 
@@ -762,14 +792,14 @@
                 clearInterval(poll);
                 console.warn('[OpenCV] timed out after 45s — shape detection will be unavailable');
                 $cvDot.classList.add('warn');
-                resolve();
+                resolve(false);
             }, 45000);
 
             function onReady() {
                 clearInterval(poll);
                 clearTimeout(timeout);
                 console.log('[OpenCV] runtime ready — cv.Mat exists:', typeof cv.Mat === 'function');
-                resolve();
+                resolve(true);
             }
 
             const poll = setInterval(() => {
@@ -784,12 +814,12 @@
                         if (module) window.cv = module;
                         clearTimeout(timeout);
                         console.log('[OpenCV] initialized via cv()');
-                        resolve();
+                        resolve(true);
                     }).catch(e => {
                         console.error('[OpenCV] init error:', e);
                         clearTimeout(timeout);
                         $cvDot.classList.add('warn');
-                        resolve();
+                        resolve(false);
                     });
                     return;
                 }
