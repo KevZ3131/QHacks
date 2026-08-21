@@ -10,6 +10,8 @@ class AudioEngine {
         this.masterGain   = null;
         this.compressor   = null;
         this.initialized  = false;
+        this.volume       = 0.75;
+        this.muted        = false;
         /** Map<shapeId, {stop:Function}> */
         this.activeNotes  = new Map();
         /** Pre-computed note → frequency table */
@@ -21,8 +23,11 @@ class AudioEngine {
 
     /** Must be called from a user-gesture handler (click / tap). */
     init () {
-        if (this.initialized) return;
-        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (this.initialized) return true;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return false;
+
+        this.ctx = new AudioContextClass();
 
         // Compressor → prevents clipping when many notes play at once
         this.compressor = this.ctx.createDynamicsCompressor();
@@ -34,19 +39,39 @@ class AudioEngine {
 
         // Master gain
         this.masterGain = this.ctx.createGain();
-        this.masterGain.gain.value = 0.75;
+        this.masterGain.gain.value = this.muted ? 0 : this.volume;
 
         this.compressor.connect(this.masterGain);
         this.masterGain.connect(this.ctx.destination);
 
         this.initialized = true;
+        return true;
     }
 
     /** Resume context if it was suspended (autoplay policy). */
     async resume () {
         if (this.ctx && this.ctx.state === 'suspended') {
-            await this.ctx.resume();
+            try {
+                await this.ctx.resume();
+            } catch (error) {
+                console.warn('[AudioEngine] could not resume audio:', error);
+            }
         }
+    }
+
+    setVolume (value) {
+        this.volume = Math.max(0, Math.min(1, Number(value) || 0));
+        if (!this.masterGain || !this.ctx) return;
+        this.masterGain.gain.setTargetAtTime(
+            this.muted ? 0 : this.volume,
+            this.ctx.currentTime,
+            0.015
+        );
+    }
+
+    setMuted (muted) {
+        this.muted = Boolean(muted);
+        this.setVolume(this.volume);
     }
 
     /**
@@ -56,12 +81,13 @@ class AudioEngine {
      * @param {string} instrument – 'piano' | 'drums'
      */
     play (id, note, instrument) {
-        if (!this.initialized) return;
-        if (this.activeNotes.has(id)) return; // already sounding
+        if (!this.initialized) return false;
+        if (instrument !== 'drums' && this.activeNotes.has(id)) return false;
         this.resume();
 
-        if (instrument === 'piano') this._pianoOn(id, note);
-        else if (instrument === 'drums') this._drumHit(id, note);
+        if (instrument === 'piano') return this._pianoOn(id, note);
+        if (instrument === 'drums') return this._drumHit(id, note);
+        return false;
     }
 
     /** Release a sustained note. */
@@ -82,7 +108,7 @@ class AudioEngine {
 
     _pianoOn (id, noteName) {
         const f = this.freq[noteName];
-        if (!f) return;
+        if (!f) return false;
 
         const t  = this.ctx.currentTime;
         const out = this.compressor;
@@ -121,8 +147,9 @@ class AudioEngine {
                 env.gain.setValueAtTime(env.gain.value, now);
                 env.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
                 oscs.forEach(o => o.stop(now + 0.15));
-            }
+            },
         });
+        return true;
     }
 
     /* ---------- drums ---------- */
@@ -138,9 +165,14 @@ class AudioEngine {
             case 'crash':  this._crash(t);  break;
             default:       this._kick(t);   break;
         }
-        // Drums are one-shot; stop is a no-op.  Remove after sound ends.
-        this.activeNotes.set(id, { stop: () => {} });
-        setTimeout(() => this.activeNotes.delete(id), 600);
+        // Drums are retriggerable one-shots. A token prevents an older
+        // cleanup timer from deleting a newer hit that reused the same id.
+        const token = Symbol(id);
+        this.activeNotes.set(id, { stop: () => {}, token });
+        setTimeout(() => {
+            if (this.activeNotes.get(id)?.token === token) this.activeNotes.delete(id);
+        }, 600);
+        return true;
     }
 
     _kick (t) {

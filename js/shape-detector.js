@@ -19,6 +19,8 @@ class ShapeDetector {
         this.ready          = false;
         /** Last debug log string */
         this.lastLog        = '';
+        /** Last raw result, reused when settings change. */
+        this.lastResult     = null;
         /** Cached paper contour (in processing-canvas coords) for overlay drawing. */
         this.paperContour   = null;
         /** Intermediate canvas used to feed frames to OpenCV */
@@ -39,6 +41,11 @@ class ShapeDetector {
      * @param {number} videoH – native video height
      */
     init (videoW, videoH) {
+        if (this.paperContour) this.paperContour.delete();
+        this.paperContour = null;
+        this.lastResult = null;
+        this.shapes = [];
+
         // Down-scale for speed (process at max 640 wide)
         const maxW = 640;
         const scale = videoW > maxW ? maxW / videoW : 1;
@@ -60,6 +67,8 @@ class ShapeDetector {
     destroy () {
         if (this.paperContour) this.paperContour.delete();
         this.paperContour = null;
+        this.lastResult = null;
+        this.shapes = [];
         this.ready = false;
     }
 
@@ -98,6 +107,7 @@ class ShapeDetector {
         }
 
         this.shapes = [...result.rectangles, ...result.circles];
+        this.lastResult = result;
         console.log('[ShapeDetector] found', result.rectangles.length,
                     'rects,', result.circles.length, 'circles');
         return result;
@@ -483,10 +493,10 @@ class ShapeDetector {
             }
             const simplePts = this._simplifyContour(cntPoints, 0.01 * peri);
 
-            const isCircular = circularity >= 0.65 && aspect >= 0.5 && aspect <= 2.0;
-            if (isCircular) {
+            const shapeType = this._classifyGeometry(verts, circularity, area / (rect.width * rect.height), aspect);
+            if (shapeType === 'circle') {
                 circles.push(this._scaleCircle(rect, area, simplePts));
-            } else {
+            } else if (shapeType === 'rectangle') {
                 rectangles.push(this._scaleRect(rect, area, simplePts));
             }
         }
@@ -556,16 +566,27 @@ class ShapeDetector {
             }
             const simplePts = this._simplifyContour(cntPoints, 0.01 * peri);
 
-            const isCircular = circularity >= 0.65 && aspect >= 0.5 && aspect <= 2.0;
-            if (isCircular) {
+            const shapeType = this._classifyGeometry(verts, circularity, extent, aspect);
+            if (shapeType === 'circle') {
                 circles.push(this._scaleCircle(rect, area, simplePts));
-            } else {
+            } else if (shapeType === 'rectangle') {
                 rectangles.push(this._scaleRect(rect, area, simplePts));
             }
         }
 
         contours.delete(); hierarchy.delete();
         return { rectangles, circles };
+    }
+
+    /** Reject contour noise before it reaches note assignment. */
+    _classifyGeometry (vertices, circularity, extent, aspect) {
+        const circle = vertices >= 5 && circularity >= 0.66 && extent >= 0.45 &&
+            aspect >= 0.55 && aspect <= 1.8;
+        if (circle) return 'circle';
+
+        const rectangle = vertices >= 4 && vertices <= 12 && extent >= 0.42 &&
+            aspect >= 0.12 && aspect <= 8;
+        return rectangle ? 'rectangle' : null;
     }
 
     /* ---------- coordinate helpers ---------- */

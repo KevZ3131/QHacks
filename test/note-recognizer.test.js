@@ -42,3 +42,58 @@ test('black-key mapping never produces unsupported E# or B# notes', () => {
 
     assert.equal(recognizer._deriveBlackNote({ centerX: 70 }, whiteKeys, 0, 4), 'D#4');
 });
+
+test('perspective-distorted white keys are not misclassified by area alone', () => {
+    const recognizer = new NoteRecognizer();
+    const rectangles = [
+        rectangle(0, 1000),
+        rectangle(30, 900),
+        rectangle(60, 600),
+        rectangle(90, 950),
+    ];
+
+    const notes = recognizer.assignNotes({ rectangles, circles: [] }, 4);
+
+    assert.equal(notes.filter(shape => shape.isBlack).length, 0);
+    assert.deepEqual(notes.map(shape => shape.note), ['C4', 'D4', 'E4', 'F4']);
+});
+
+test('clearly shorter and smaller rectangles are classified as black keys', () => {
+    const recognizer = new NoteRecognizer();
+    const whites = Array.from({ length: 5 }, (_, index) => rectangle(index * 40, 1000));
+    const blacks = [
+        { ...rectangle(20, 300), width: 12, height: 25 },
+        { ...rectangle(100, 300), width: 12, height: 25 },
+    ];
+
+    const assigned = recognizer.assignNotes({ rectangles: [...whites, ...blacks], circles: [] }, 4);
+
+    assert.equal(assigned.filter(shape => shape.isBlack).length, 2);
+});
+
+test('custom notes survive a nearby re-scan', () => {
+    const recognizer = new NoteRecognizer();
+    recognizer.assignNotes({ rectangles: [rectangle(20), rectangle(60)], circles: [] }, 4);
+    recognizer.setShapeNote('w0', 'G5');
+
+    const rescanned = recognizer.assignNotes({
+        rectangles: [rectangle(23), rectangle(63)],
+        circles: [],
+    }, 4);
+
+    assert.equal(rescanned[0].note, 'G5');
+    assert.equal(rescanned[0].customNote, true);
+    assert.equal(rescanned[1].note, 'D4');
+});
+
+test('polygon presses reject points outside the actual contour', () => {
+    const recognizer = new NoteRecognizer();
+    recognizer.assignedShapes = [{
+        id: 'w0', type: 'rectangle', priority: 0, area: 200,
+        x: 0, y: 0, width: 20, height: 20,
+        points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 10, y: 20 }],
+    }];
+
+    assert.equal(recognizer.getPresses([{ x: 0.5, y: 0.25 }], 20, 20).length, 1);
+    assert.equal(recognizer.getPresses([{ x: 0.05, y: 0.95 }], 20, 20).length, 0);
+});

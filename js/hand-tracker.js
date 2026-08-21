@@ -18,6 +18,7 @@ class HandTracker {
         this.results    = null;
         this.ready      = false;
         this.processing = false;
+        this.lastError  = null;
         /** External callback — set by main.js */
         this.onResults  = null;
     }
@@ -25,10 +26,15 @@ class HandTracker {
     /* ---------- lifecycle ---------- */
 
     async init () {
+        if (typeof Hands === 'undefined') {
+            throw new Error('MediaPipe Hands did not load.');
+        }
+
+        await this.close();
         // eslint-disable-next-line no-undef
         this.hands = new Hands({
             locateFile: file =>
-                `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+                `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
         });
 
         this.hands.setOptions({
@@ -41,11 +47,28 @@ class HandTracker {
         this.hands.onResults(r => {
             this.results    = r;
             this.processing = false;
+            this.lastError  = null;
             if (this.onResults) this.onResults(r);
         });
 
         await this.hands.initialize();
         this.ready = true;
+    }
+
+    async close () {
+        const tracker = this.hands;
+        this.ready = false;
+        this.processing = false;
+        this.results = null;
+        this.hands = null;
+
+        if (tracker && typeof tracker.close === 'function') {
+            try {
+                await tracker.close();
+            } catch (error) {
+                console.warn('[HandTracker] close failed:', error);
+            }
+        }
     }
 
     /** Send a video frame for processing. */
@@ -56,6 +79,7 @@ class HandTracker {
             await this.hands.send({ image: videoEl });
         } catch (e) {
             this.processing = false;
+            this.lastError = e;
         }
     }
 
@@ -127,7 +151,5 @@ class HandTracker {
         return this.results.multiHandLandmarks || [];
     }
 }
-
-window.HandTracker = HandTracker;
 
 window.HandTracker = HandTracker;

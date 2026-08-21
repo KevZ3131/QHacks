@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "Draw instruments on paper, point your camera, and play them with your fingers in real time.",
   "scripts": {
-    "start": "live-server --port=8000 --entry-file=index.html",
-    "dev": "live-server --port=8000 --entry-file=index.html",
+    "start": "node scripts/dev-server.js",
+    "dev": "node scripts/dev-server.js",
     "test": "node --test"
   },
   "keywords": [
@@ -14,8 +14,5 @@
     "opencv",
     "web-audio"
   ],
-  "license": "MIT",
-  "devDependencies": {
-    "live-server": "^1.2.2"
-  }
+  "license": "MIT"
 }
