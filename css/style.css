@@ -2,15 +2,17 @@
    Paper Piano – Styles
    ========================================================= */
 :root {
-  --bg: #0b0b1a;
-  --surface: #151528;
-  --border: #2a2a4a;
-  --primary: #6c63ff;
-  --accent: #ff6584;
+  --bg: #111310;
+  --surface: #1a1d19;
+  --surface-raised: #222620;
+  --border: #343a31;
+  --primary: #b7e46c;
+  --primary-ink: #11160c;
+  --accent: #ff8068;
   --green: #00e676;
   --orange: #ff9100;
-  --text: #e8e8f0;
-  --text-dim: #888899;
+  --text: #f1f3ed;
+  --text-dim: #a4aa9e;
   --radius: 10px;
 }
 
@@ -35,6 +37,34 @@ body {
   color: var(--text);
 }
 
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+#overlay:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 3px;
+}
+
+.hidden {
+  display: none;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* =========== Splash =========== */
 #splash {
   position: fixed;
@@ -42,28 +72,30 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #0b0b1a 0%, #1a1035 100%);
+  overflow-y: auto;
+  background: var(--bg);
   z-index: 100;
   transition: opacity 0.4s ease;
 }
 #splash.hidden {
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
+  transition:
+    opacity 0.4s ease,
+    visibility 0s 0.4s;
 }
 
 .splash-content {
   max-width: 520px;
   text-align: center;
-  padding: 2rem;
+  padding: max(2rem, env(safe-area-inset-top)) 2rem max(2rem, env(safe-area-inset-bottom));
 }
 
 .logo {
   font-size: 2.8rem;
   font-weight: 800;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--primary);
   margin-bottom: 0.4rem;
 }
 .tagline {
@@ -107,19 +139,41 @@ body {
   font-weight: 700;
   border: none;
   border-radius: 50px;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-ink);
   cursor: pointer;
   transition:
     transform 0.15s,
     box-shadow 0.15s;
 }
 .btn-primary:hover {
-  transform: scale(1.04);
-  box-shadow: 0 4px 24px rgba(108, 99, 255, 0.45);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 0 #4b5d31;
 }
 .btn-primary:active {
-  transform: scale(0.97);
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+.start-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.btn-secondary {
+  padding: 0.85rem 1.5rem;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  border-radius: 50px;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  border-color: var(--primary);
 }
 
 .note {
@@ -135,6 +189,7 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  height: 100dvh;
 }
 #app.hidden {
   display: none;
@@ -145,7 +200,7 @@ body {
   display: flex;
   gap: 1rem;
   align-items: center;
-  padding: 0.45rem 1rem;
+  padding: calc(0.45rem + env(safe-area-inset-top)) 1rem 0.45rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   font-size: 0.78rem;
@@ -155,6 +210,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  color: var(--text-dim);
 }
 .dot {
   width: 8px;
@@ -183,15 +239,22 @@ body {
 /* ---- Camera container ---- */
 #cameraContainer {
   flex: 1;
+  min-height: 0;
   position: relative;
   overflow: hidden;
   background: #000;
+}
+#cameraContainer.demo-mode {
+  background: #ece8dc;
 }
 #video {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
+}
+#video.hidden {
+  display: none;
 }
 #video.mirrored {
   transform: scaleX(-1);
@@ -200,6 +263,7 @@ body {
 #overlay {
   position: absolute;
   cursor: pointer;
+  touch-action: manipulation;
   /* Size/position set by JS to match video's rendered area */
 }
 #overlay.mirrored {
@@ -242,9 +306,27 @@ body {
   font-size: 0.9rem;
 }
 
+.stage-hint {
+  position: absolute;
+  left: 50%;
+  top: 1rem;
+  transform: translateX(-50%);
+  max-width: min(90%, 620px);
+  padding: 0.55rem 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: var(--radius);
+  background: rgba(17, 19, 16, 0.86);
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+  z-index: 6;
+}
+
 /* ---- Controls ---- */
 #controls {
-  padding: 0.55rem 1rem;
+  padding: 0.55rem 1rem calc(0.55rem + env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
   z-index: 10;
@@ -277,7 +359,7 @@ body {
     border-color 0.15s;
 }
 .btn-ctrl:hover:not(:disabled) {
-  background: #1e1e3a;
+  background: var(--surface-raised);
   border-color: var(--primary);
 }
 .btn-ctrl:disabled {
@@ -286,7 +368,15 @@ body {
 }
 .btn-ctrl.active {
   border-color: var(--primary);
-  background: rgba(108, 99, 255, 0.15);
+  background: rgba(183, 228, 108, 0.12);
+}
+.btn-danger {
+  margin-left: auto;
+  border-color: rgba(255, 128, 104, 0.55);
+  color: #ffc1b6;
+}
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--accent);
 }
 .btn-small {
   padding: 0.3rem 0.6rem;
@@ -310,6 +400,11 @@ body {
   accent-color: var(--primary);
 }
 
+.keyboard-help {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+}
+
 /* ---- Note HUD ---- */
 #noteHUD {
   position: fixed;
@@ -326,8 +421,8 @@ body {
   border-radius: 20px;
   font-size: 1.3rem;
   font-weight: 800;
-  background: rgba(108, 99, 255, 0.85);
-  color: #fff;
+  background: rgba(183, 228, 108, 0.92);
+  color: var(--primary-ink);
   animation: popIn 0.15s ease-out;
   white-space: nowrap;
 }
@@ -349,8 +444,7 @@ body {
 #shapeBadge {
   position: absolute;
   top: 44px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 1rem;
   padding: 0.3rem 0.9rem;
   border-radius: 20px;
   background: rgba(0, 0, 0, 0.65);
@@ -400,7 +494,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--primary);
   border-radius: var(--radius);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 10px 0 rgba(0, 0, 0, 0.45);
   overflow: hidden;
   animation: editorIn 0.15s ease-out;
 }
@@ -423,7 +517,7 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 0.45rem 0.7rem;
-  background: rgba(108, 99, 255, 0.18);
+  background: rgba(183, 228, 108, 0.12);
   border-bottom: 1px solid var(--border);
   font-size: 0.82rem;
   font-weight: 700;
@@ -477,16 +571,16 @@ body {
   text-align: center;
 }
 .note-btn:hover {
-  background: #1e1e3a;
+  background: var(--surface-raised);
   border-color: var(--primary);
 }
 .note-btn.selected {
   background: var(--primary);
   border-color: var(--primary);
-  color: #fff;
+  color: var(--primary-ink);
 }
 .note-btn.sharp {
-  background: #1a1a30;
+  background: #10120f;
 }
 .note-btn.drum-btn {
   background: rgba(76, 175, 80, 0.1);
@@ -500,6 +594,21 @@ body {
   background: rgba(76, 175, 80, 0.7);
   border-color: var(--green);
   color: #fff;
+}
+
+.editor-remove {
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid rgba(255, 128, 104, 0.55);
+  border-radius: 6px;
+  background: transparent;
+  color: #ffc1b6;
+  cursor: pointer;
+}
+.editor-remove:hover {
+  border-color: var(--accent);
+  background: rgba(255, 128, 104, 0.1);
 }
 
 /* ---- Responsive ---- */
@@ -518,6 +627,20 @@ body {
     padding: 0.35rem 0.55rem;
     font-size: 0.75rem;
   }
+  #statusBar {
+    gap: 0.55rem;
+    font-size: 0.68rem;
+  }
+  #fps {
+    display: none;
+  }
+  #controls {
+    max-height: 42dvh;
+    overflow-y: auto;
+  }
+  .btn-danger {
+    margin-left: 0;
+  }
   .slider-label input[type="range"] {
     width: 60px;
   }
@@ -526,5 +649,33 @@ body {
   }
   .api-key-input {
     width: 120px;
+  }
+}
+
+@media (max-height: 620px) {
+  .splash-content {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+  .tagline,
+  .instructions {
+    margin-bottom: 1rem;
+  }
+  .step {
+    margin-bottom: 0.6rem;
+  }
+  .keyboard-help {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

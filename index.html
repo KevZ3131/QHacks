@@ -3,8 +3,10 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#111310">
     <title>Paper Piano — Draw &amp; Play</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="css/style.css">
 </head>
 
@@ -31,31 +33,41 @@
                 </div>
             </div>
 
-            <button id="startBtn" class="btn-primary">Start Camera</button>
-            <p class="note">Requires camera &amp; microphone permissions. Works best in Chrome.</p>
+            <div class="start-actions">
+                <button id="startBtn" class="btn-primary">Start Camera</button>
+                <button id="demoBtn" class="btn-secondary">Try Sample Layout</button>
+            </div>
+            <p id="startNote" class="note" role="status" aria-live="polite">
+                Camera stays in your browser and stops when you end the session.
+            </p>
         </div>
     </div>
 
     <!-- ======== Main Application ======== -->
-    <div id="app" class="hidden">
+    <div id="app" class="hidden" aria-hidden="true">
         <!-- Status indicators -->
-        <div id="statusBar">
+        <div id="statusBar" role="status" aria-live="polite">
             <div class="status-item" id="cameraStatus">
-                <span class="dot"></span> Camera
+                <span class="dot" aria-hidden="true"></span>
+                <span id="cameraStatusText">Camera off</span>
             </div>
             <div class="status-item" id="handStatus">
-                <span class="dot"></span> Hands
+                <span class="dot" aria-hidden="true"></span>
+                <span id="handStatusText">Hand tracker off</span>
             </div>
             <div class="status-item" id="cvStatus">
-                <span class="dot"></span> Vision
+                <span class="dot" aria-hidden="true"></span>
+                <span id="cvStatusText">Vision off</span>
             </div>
-            <div id="fps">-- fps</div>
+            <div id="fps" aria-label="Frame rate">-- fps</div>
         </div>
 
         <!-- Camera + overlay -->
         <div id="cameraContainer">
             <video id="video" autoplay playsinline muted></video>
-            <canvas id="overlay"></canvas>
+            <canvas id="overlay" tabindex="0"
+                aria-label="Instrument stage. Click a shape to play and edit it. Use A through J for piano keys and 1 through 6 for drums."></canvas>
+            <div id="stageHint" class="stage-hint hidden" role="status"></div>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <p id="loadingText">Initializing camera…</p>
@@ -69,11 +81,14 @@
                     <span class="icon">&#128269;</span> Scan Shapes
                 </button>
                 <button id="autoScanBtn" class="btn-ctrl">
-                    <span class="icon">&#128260;</span> Auto: OFF
+                    Auto-scan: OFF
                 </button>
                 <button id="mirrorBtn" class="btn-ctrl">
-                    <span class="icon">&#128260;</span> Mirror
+                    Mirror: OFF
                 </button>
+                <button id="switchCameraBtn" class="btn-ctrl">Switch Camera</button>
+                <button id="sampleBtn" class="btn-ctrl">Load Sample</button>
+                <button id="endBtn" class="btn-ctrl btn-danger">End Session</button>
             </div>
 
             <div class="controls-row">
@@ -82,35 +97,40 @@
                     <input type="range" id="octaveSlider" min="2" max="6" value="4">
                 </label>
                 <label class="slider-label">
-                    Sensitivity
+                    Sensitivity <span id="sensitivityVal">50</span>
                     <input type="range" id="sensitivitySlider" min="10" max="100" value="50">
                 </label>
-                <button id="debugBtn" class="btn-ctrl btn-small">Debug</button>
+                <label class="slider-label">
+                    Volume <span id="volumeVal">75</span>
+                    <input type="range" id="volumeSlider" min="0" max="100" value="75">
+                </label>
+                <button id="debugBtn" class="btn-ctrl btn-small" aria-controls="debugPanel"
+                    aria-expanded="false">Debug</button>
             </div>
-
-
+            <p class="keyboard-help">Keyboard: A W S E D F T G Y H U J for piano &middot; 1–6 for drums</p>
         </div>
 
         <!-- Active-note heads-up -->
-        <div id="noteHUD"></div>
+        <div id="noteHUD" aria-hidden="true"></div>
+        <div id="announcement" class="sr-only" aria-live="polite"></div>
 
         <!-- Shape counter badge -->
-        <div id="shapeBadge" class="hidden">
+        <div id="shapeBadge" class="hidden" role="status">
             <span id="keyCount">0</span> keys &middot;
             <span id="padCount">0</span> pads
         </div>
 
         <!-- Shape editor popup -->
-        <div id="shapeEditor" class="hidden">
+        <div id="shapeEditor" class="hidden" role="dialog" aria-modal="false" aria-labelledby="editorTitle">
             <div class="editor-header">
                 <span id="editorTitle">Edit Shape</span>
-                <button id="editorClose" class="editor-close">&times;</button>
+                <button id="editorClose" class="editor-close" aria-label="Close shape editor">&times;</button>
             </div>
             <div id="editorBody"></div>
         </div>
 
         <!-- Debug overlay -->
-        <div id="debugPanel" class="hidden">
+        <div id="debugPanel" class="hidden" aria-label="Vision debug output">
             <canvas id="debugCanvas"></canvas>
             <pre id="debugInfo"></pre>
         </div>
@@ -118,10 +138,10 @@
 
     <!-- ============ External Libraries ============ -->
     <!-- MediaPipe Hands (legacy Solutions API — works with plain script tags) -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js"
         crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 
     <!-- OpenCV.js (loaded async — shape detection waits for it) -->
     <script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js" type="text/javascript"
@@ -132,6 +152,7 @@
     <script src="js/hand-tracker.js"></script>
     <script src="js/shape-detector.js"></script>
     <script src="js/note-recognizer.js"></script>
+    <script src="js/interaction-engine.js"></script>
     <script src="js/main.js"></script>
 </body>
 

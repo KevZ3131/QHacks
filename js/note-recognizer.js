@@ -29,6 +29,7 @@ class NoteRecognizer {
      * @returns {object[]} – assigned shapes
      */
     assignNotes (shapes, octave = 4) {
+        const customAssignments = this.assignedShapes.filter(shape => shape.customNote);
         const { rectangles, circles } = shapes;
         const { whites, blacks } = this._classifyKeys(rectangles);
 
@@ -75,8 +76,63 @@ class NoteRecognizer {
             }));
         });
 
+        this._restoreCustomAssignments(assigned, customAssignments);
         this.assignedShapes = assigned;
         return assigned;
+    }
+
+    setShapeNote (shapeId, note) {
+        const shape = this.assignedShapes.find(candidate => candidate.id === shapeId);
+        if (!shape) return false;
+        shape.note = note;
+        shape.customNote = true;
+        return true;
+    }
+
+    removeShape (shapeId) {
+        const before = this.assignedShapes.length;
+        this.assignedShapes = this.assignedShapes.filter(shape => shape.id !== shapeId);
+        return this.assignedShapes.length !== before;
+    }
+
+    clear () {
+        this.assignedShapes = [];
+    }
+
+    _restoreCustomAssignments (assigned, previous) {
+        const used = new Set();
+        for (const shape of assigned) {
+            let best = null;
+            let bestScore = Infinity;
+
+            previous.forEach((candidate, index) => {
+                if (used.has(index) || candidate.type !== shape.type ||
+                    Boolean(candidate.isBlack) !== Boolean(shape.isBlack)) return;
+
+                const distance = Math.hypot(
+                    candidate.centerX - shape.centerX,
+                    candidate.centerY - shape.centerY
+                );
+                const scale = Math.max(
+                    shape.width || shape.radius * 2 || 1,
+                    shape.height || shape.radius * 2 || 1,
+                    candidate.width || candidate.radius * 2 || 1,
+                    candidate.height || candidate.radius * 2 || 1
+                );
+                const sameIdBonus = candidate.id === shape.id ? 0.35 : 0;
+                const score = distance / scale - sameIdBonus;
+                if (score < bestScore) {
+                    best = { candidate, index };
+                    bestScore = score;
+                }
+            });
+
+            if (best && bestScore <= 1.25) {
+                shape.note = best.candidate.note;
+                shape.customNote = true;
+                used.add(best.index);
+            }
+        }
     }
 
     /* ---------- key classification ---------- */
@@ -93,35 +149,29 @@ class NoteRecognizer {
     _classifyKeys (rects) {
         if (rects.length <= 1) return { whites: rects, blacks: [] };
 
-        // Sort descending by area
-        const sorted = [...rects].sort((a, b) => b.area - a.area);
-        const maxArea = sorted[0].area;
+        const median = values => {
+            const sorted = [...values].sort((a, b) => a - b);
+            const middle = Math.floor(sorted.length / 2);
+            return sorted.length % 2 ? sorted[middle] :
+                (sorted[middle - 1] + sorted[middle]) / 2;
+        };
+        const medianArea = median(rects.map(rect => rect.area));
+        const medianHeight = median(rects.map(rect => rect.height));
 
-        // Threshold: anything < 65 % of the largest rectangle is a black key candidate
-        const threshold = maxArea * 0.65;
-
-        const whites = [];
-        const blacks = [];
-
-        for (const r of sorted) {
-            if (r.area < threshold) {
-                blacks.push(r);
-            } else {
-                whites.push(r);
-            }
+        // A black key must be clearly shorter AND smaller. Requiring both
+        // avoids treating a perspective-distorted white key as black.
+        const blacks = rects.filter(rect =>
+            rect.height < medianHeight * 0.78 && rect.area < medianArea * 0.72
+        );
+        if (blacks.length === 0 || blacks.length >= rects.length / 2) {
+            return { whites: [...rects], blacks: [] };
         }
 
-        // If all ended up in one bucket, fall back to height-based split
-        if (blacks.length === 0 && rects.length > 2) {
-            const heights = rects.map(r => r.height).sort((a, b) => a - b);
-            const medH    = heights[Math.floor(heights.length / 2)];
-            return {
-                whites: rects.filter(r => r.height >= medH * 0.75),
-                blacks: rects.filter(r => r.height <  medH * 0.75),
-            };
-        }
-
-        return { whites, blacks };
+        const blackSet = new Set(blacks);
+        return {
+            whites: rects.filter(rect => !blackSet.has(rect)),
+            blacks,
+        };
     }
 
     /**
@@ -130,17 +180,18 @@ class NoteRecognizer {
      * we use that white key's note + '#'.
      */
     _deriveBlackNote (blackKey, whiteKeys, fallbackIdx, octave) {
-        let leftWhite = null;
-        for (const w of whiteKeys) {
-            if (w.centerX < blackKey.centerX) {
-                if (!leftWhite || w.centerX > leftWhite.centerX) leftWhite = w;
-            }
-        }
-        if (leftWhite) {
-            const base = leftWhite.note.replace(/\d+$/, '');
-            const oct  = leftWhite.note.match(/\d+$/)?.[0] ?? octave;
-            // Only add '#' if the note isn't already a sharp
-            if (!base.includes('#')) return base + '#' + oct;
+        const sharpable = new Set(['C', 'D', 'F', 'G', 'A']);
+        const leftWhites = whiteKeys
+            .filter(w => w.centerX < blackKey.centerX)
+            .sort((a, b) => b.centerX - a.centerX);
+
+        // E and B do not have black keys above them. If a contour is slightly
+        // misplaced, use the closest valid black-key boundary to avoid a
+        // silent E# or B# note.
+        for (const white of leftWhites) {
+            const base = white.note.replace(/\d+$/, '');
+            const oct = white.note.match(/\d+$/)?.[0] ?? octave;
+            if (sharpable.has(base)) return base + '#' + oct;
         }
         // Fallback: cycle through standard black notes
         const ni  = fallbackIdx % this.BLACK_NOTES.length;
@@ -172,19 +223,7 @@ class NoteRecognizer {
 
             // Collect every shape that contains this point
             const hits = this.assignedShapes.filter(s => {
-                const pad = padPx;
-                if (s.type === 'rectangle') {
-                    return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
-                } else if (s.type === 'circle') {
-                    const dx = px - s.centerX;
-                    const dy = py - s.centerY;
-                    return Math.hypot(dx, dy) <= s.radius + pad;
-                } else if (s.type === 'triangle') {
-                    return px >= s.x - pad && px <= s.x + s.width + pad &&
-                           py >= s.y - pad && py <= s.y + s.height + pad;
-                }
-                return false;
+                return this._contains(s, px, py, padPx);
             });
 
             if (hits.length === 0) continue;
@@ -199,6 +238,43 @@ class NoteRecognizer {
         }
 
         return pressed;
+    }
+
+    _contains (shape, px, py, pad) {
+        if (shape.points && shape.points.length >= 3) {
+            let inside = false;
+            const points = shape.points;
+            for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                const a = points[i];
+                const b = points[j];
+                if ((a.y > py) !== (b.y > py) &&
+                    px < (b.x - a.x) * (py - a.y) / (b.y - a.y) + a.x) {
+                    inside = !inside;
+                }
+            }
+            if (inside) return true;
+            if (pad <= 0) return false;
+            for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                if (this._distanceToSegment(px, py, points[j], points[i]) <= pad) return true;
+            }
+            return false;
+        }
+
+        if (shape.type === 'circle') {
+            return Math.hypot(px - shape.centerX, py - shape.centerY) <= shape.radius + pad;
+        }
+        return px >= shape.x - pad && px <= shape.x + shape.width + pad &&
+               py >= shape.y - pad && py <= shape.y + shape.height + pad;
+    }
+
+    _distanceToSegment (px, py, a, b) {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared === 0) return Math.hypot(px - a.x, py - a.y);
+        const ratio = ((px - a.x) * dx + (py - a.y) * dy) / lengthSquared;
+        const t = Math.max(0, Math.min(1, ratio));
+        return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
     }
 }
 
